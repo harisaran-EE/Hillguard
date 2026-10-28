@@ -2,337 +2,180 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#10131c">
-    <title>Calculator</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #10131c;
-        color: #f5f6fa;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        min-height: 100vh;
-        margin: 0;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        background:
-          radial-gradient(ellipse at 50% 0%, rgb(91 91 214 / 18%), transparent 48%),
-          #10131c;
-      }
-
-      .calculator {
-        width: min(100%, 360px);
-        padding: 24px;
-        border: 1px solid rgb(255 255 255 / 9%);
-        border-radius: 28px;
-        background: #191d29;
-        box-shadow: 0 24px 70px rgb(0 0 0 / 40%);
-      }
-
-      .heading {
-        margin: 0 0 24px;
-        color: #9da4b8;
-        font-size: 0.75rem;
-        font-weight: 700;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-      }
-
-      .display {
-        min-height: 132px;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        align-items: flex-end;
-        overflow: hidden;
-        padding: 8px 2px 24px;
-      }
-
-      .expression {
-        min-height: 24px;
-        max-width: 100%;
-        overflow: hidden;
-        color: #9299ac;
-        font-size: 1rem;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .result {
-        max-width: 100%;
-        overflow: hidden;
-        font-size: clamp(2.5rem, 12vw, 3.5rem);
-        font-variant-numeric: tabular-nums;
-        font-weight: 500;
-        letter-spacing: -0.06em;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .keys {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 12px;
-      }
-
-      button {
-        min-width: 0;
-        aspect-ratio: 1;
-        border: 0;
-        border-radius: 18px;
-        background: #252a39;
-        color: #f5f6fa;
-        cursor: pointer;
-        font: inherit;
-        font-size: 1.25rem;
-        transition: background 120ms ease, transform 120ms ease;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      button:hover {
-        background: #303649;
-      }
-
-      button:active {
-        transform: scale(0.96);
-      }
-
-      button:focus-visible {
-        outline: 2px solid #a8a2ff;
-        outline-offset: 3px;
-      }
-
-      .utility {
-        color: #b6b9c9;
-        font-size: 1rem;
-      }
-
-      .operator {
-        background: #30334b;
-        color: #b9b4ff;
-        font-size: 1.4rem;
-      }
-
-      .operator:hover {
-        background: #3a3e59;
-      }
-
-      .equals {
-        background: #7669e8;
-        color: #fff;
-        font-size: 1.5rem;
-      }
-
-      .equals:hover {
-        background: #887cf3;
-      }
-
-      .zero {
-        grid-column: span 2;
-        aspect-ratio: auto;
-        text-align: left;
-        padding-left: 28px;
-      }
-
-      @media (max-width: 380px) {
-        .calculator {
-          padding: 18px;
-        }
-
-        .keys {
-          gap: 9px;
-        }
-
-        button {
-          border-radius: 15px;
-        }
-      }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#1e293b">
+    <meta name="description" content="Hillguard is an offline-ready landslide and road hazard safety prototype for Northeast India.">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <title>Hillguard — Terrain safety</title>
   </head>
   <body>
-    <main class="calculator" aria-label="Calculator">
-      <h1 class="heading">Calculator</h1>
-      <section class="display" aria-live="polite" aria-atomic="true">
-        <div class="expression" id="expression"></div>
-        <output class="result" id="result">0</output>
-      </section>
-      <div class="keys">
-        <button class="utility" type="button" data-action="clear" aria-label="Clear">AC</button>
-        <button class="utility" type="button" data-action="sign" aria-label="Change sign">+/-</button>
-        <button class="utility" type="button" data-action="backspace" aria-label="Delete last digit">DEL</button>
-        <button class="operator" type="button" data-operator="/" aria-label="Divide">÷</button>
-
-        <button type="button" data-digit="7">7</button>
-        <button type="button" data-digit="8">8</button>
-        <button type="button" data-digit="9">9</button>
-        <button class="operator" type="button" data-operator="*" aria-label="Multiply">×</button>
-
-        <button type="button" data-digit="4">4</button>
-        <button type="button" data-digit="5">5</button>
-        <button type="button" data-digit="6">6</button>
-        <button class="operator" type="button" data-operator="-" aria-label="Subtract">−</button>
-
-        <button type="button" data-digit="1">1</button>
-        <button type="button" data-digit="2">2</button>
-        <button type="button" data-digit="3">3</button>
-        <button class="operator" type="button" data-operator="+" aria-label="Add">+</button>
-
-        <button class="zero" type="button" data-digit="0">0</button>
-        <button type="button" data-action="decimal" aria-label="Decimal point">.</button>
-        <button class="equals" type="button" data-action="equals" aria-label="Equals">=</button>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Hillguard home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none">
+            <path d="M4 24 13 7l5.5 10 3-5L28 24H4Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="m11 24 7-7 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span class="brand-copy"><strong>hillguard</strong><small>Terrain safety · Northeast India</small></span>
+      </a>
+      <div class="topbar-actions">
+        <button class="install-button" id="install-app" type="button" hidden>Install app</button>
+        <span class="connectivity" id="connectivity" role="status" aria-live="polite">
+          <span class="connectivity-dot" aria-hidden="true"></span>
+          <span id="connectivity-label">Checking connection</span>
+        </span>
       </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="prototype-banner" aria-label="Prototype limitation">
+        <span class="banner-mark" aria-hidden="true">i</span>
+        <p><strong>Prototype mode</strong> · Hazards and risk inputs are examples, not live alerts. No official feed or dispatch service is connected.</p>
+        <button class="text-button" id="banner-dismiss" type="button" aria-label="Dismiss prototype notice">×</button>
+      </section>
+
+      <section class="hazard-alert" id="hazard-alert" aria-live="assertive" hidden>
+        <span class="alert-icon" aria-hidden="true">!</span>
+        <div><strong>DEMO · Hazard in the sample area</strong><span id="alert-copy">A sample road report is within 5 km. This is not a real-world warning.</span></div>
+        <button class="alert-dismiss" id="alert-dismiss" type="button" aria-label="Dismiss sample hazard alert">×</button>
+      </section>
+
+      <section class="dashboard-heading">
+        <div>
+          <p class="eyebrow"><span class="eyebrow-line"></span> TERRAIN AWARENESS / <span id="region-label">DEMO REGION</span></p>
+          <h1>Read the land.<br><span>Move with care.</span></h1>
+          <p class="heading-copy">A local-first view of slope and road reports for mountain communities.</p>
+        </div>
+        <div class="heading-status">
+          <span class="status-label">YOUR LOCATION</span>
+          <span class="location-value" id="location-summary">Not shared</span>
+          <button class="location-button" id="locate-me" type="button">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="5.2" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor"/><path d="M10 1.8v2M10 16.2v2M18.2 10h-2M3.8 10h-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Use my location
+          </button>
+        </div>
+      </section>
+
+      <section class="map-and-risk" aria-label="Terrain and risk preview">
+        <div class="map-panel">
+          <div class="map-topline">
+            <div class="map-heading"><span class="map-heading-icon" aria-hidden="true">⌖</span><span><strong>Route overview</strong><small>Illustrative terrain · no live map tiles</small></span></div>
+            <span class="map-mode"><span class="live-dot"></span> SAMPLE DATA</span>
+          </div>
+          <div class="terrain-map" role="img" aria-label="Illustrative Northeast India mountain pass, sample route and non-live hazard locations">
+            <svg class="terrain-art" viewBox="0 0 900 390" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+              <defs>
+                <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#64748b" stroke-opacity=".16" stroke-width="1"/></pattern>
+                <linearGradient id="valley" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#29394a"/><stop offset="1" stop-color="#1b2a39"/></linearGradient>
+              </defs>
+              <rect width="900" height="390" fill="url(#valley)"/>
+              <rect width="900" height="390" fill="url(#grid)"/>
+              <path d="M0 55 130 23l94 44 118-54 93 47L590 5l105 59 105-37 100 48v120l-130 19-112-39-105 48-110-38-117 51-107-28L0 286Z" fill="#314556" fill-opacity=".72"/>
+              <path d="m0 258 115-68 117 44 120-84 120 62 100-78 133 72 106-52 89 38v198H0Z" fill="#26394a"/>
+              <path d="M0 304c114-39 177 18 261-12 97-35 132-92 228-66s133 75 225 30 134-40 186-16" fill="none" stroke="#40574e" stroke-width="38" stroke-linecap="round" opacity=".8"/>
+              <path d="M0 304c114-39 177 18 261-12 97-35 132-92 228-66s133 75 225 30 134-40 186-16" fill="none" stroke="#a8b7aa" stroke-width="4" stroke-dasharray="3 13" stroke-linecap="round" opacity=".8"/>
+              <path d="M0 304c114-39 177 18 261-12 97-35 132-92 228-66s133 75 225 30 134-40 186-16" fill="none" stroke="#d3ddcf" stroke-width="2" stroke-linecap="round" opacity=".92"/>
+              <path d="M-25 173c80-52 126-35 192 4s82 74 152 58 96-57 156-37 105 93 166 62 107-73 168-57 83 48 124 31M112-10c25 87-3 116 38 183s54 88 31 145m414-351c-37 85-10 115 18 161s52 67 34 125m191-213c-12 70 12 95 39 130" fill="none" stroke="#8193a0" stroke-opacity=".23" stroke-width="1.2" stroke-dasharray="3 8"/>
+              <path d="m512 229 32-35 15 13-27 31m194-30 30-29 17 10-25 32" fill="none" stroke="#ef4444" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+              <g transform="translate(556 205)"><circle r="23" fill="#f97316" fill-opacity=".15"/><circle r="10" fill="#f97316" stroke="#1e293b" stroke-width="4"/><path d="M0-4v5m0 4v.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/></g>
+              <g transform="translate(732 201)"><circle r="22" fill="#f59e0b" fill-opacity=".16"/><circle r="9" fill="#f59e0b" stroke="#1e293b" stroke-width="4"/><path d="M0-4v5m0 4v.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/></g>
+              <g transform="translate(284 288)"><circle r="9" fill="#10b981" stroke="#e2e8f0" stroke-width="3"/><circle r="3" fill="#1e293b"/></g>
+              <text x="390" y="338" fill="#cbd5e1" font-size="12" font-family="Segoe UI, sans-serif" letter-spacing="2">NH-27 · EXAMPLE ROUTE</text>
+              <text x="550" y="175" fill="#fed7aa" font-size="11" font-family="Segoe UI, sans-serif">SAMPLE SLOPE</text>
+              <text x="727" y="170" fill="#fde68a" font-size="11" font-family="Segoe UI, sans-serif">ROAD REPORT</text>
+              <text x="22" y="354" fill="#94a3b8" font-size="10" font-family="Segoe UI, sans-serif">MAP IS AN ILLUSTRATION · NOT FOR NAVIGATION</text>
+            </svg>
+            <div class="map-location-tag"><span class="location-pulse"></span><span id="map-location-label">Sample route · Northeast India</span></div>
+            <button class="map-center-button" id="demo-location" type="button" title="Preview geofencing with a sample location">Preview sample location</button>
+            <div class="map-legend"><span><i class="legend-marker marker-red"></i>High risk · demo</span><span><i class="legend-marker marker-yellow"></i>Report · demo</span><span><i class="legend-marker marker-green"></i>You · sample</span></div>
+          </div>
+          <div class="map-foot"><span><span class="foot-indicator"></span> Illustrative corridor · not navigation</span><button class="route-action" id="route-action" type="button">Check route <span aria-hidden="true">→</span></button></div>
+        </div>
+
+        <aside class="risk-panel" aria-labelledby="risk-title">
+          <div class="risk-panel-head"><div><p class="section-kicker">RULE-BASED PREVIEW</p><h2 id="risk-title">Slope risk</h2></div><span class="risk-scale">SCORE / 10</span></div>
+          <div class="risk-score-wrap" id="risk-score-wrap" data-level="safe">
+            <div class="risk-score"><strong id="risk-score">1</strong><span>/10</span></div>
+            <span class="risk-level" id="risk-level">LOW · SAMPLE</span>
+          </div>
+          <p class="risk-explainer">A transparent demo score from rainfall, terrain, and past incident frequency.</p>
+          <label class="risk-input"><span><i class="risk-input-dot rain-dot"></i> Rainfall <small>sample</small></span><select id="rainfall-input" aria-label="Sample rainfall"><option value="1">Under 10 mm · 1 pt</option><option value="2">10–30 mm · 2 pts</option><option value="4">Over 30 mm · 4 pts</option></select></label>
+          <label class="risk-input"><span><i class="risk-input-dot slope-dot"></i> Slope <small>sample</small></span><select id="slope-input" aria-label="Sample slope"><option value="1">Low · 1 pt</option><option value="2">Moderate · 2 pts</option><option value="3">Steep · 3 pts</option></select></label>
+          <label class="risk-input"><span><i class="risk-input-dot history-dot"></i> History <small>sample</small></span><select id="history-input" aria-label="Sample incident history"><option value="0">Low · 0 pts</option><option value="3">High · 3 pts</option></select></label>
+          <div class="risk-scale-legend"><span class="scale-safe">1–3 Safe</span><span class="scale-watch">4–6 Watch</span><span class="scale-high">7–8 High</span><span class="scale-critical">9–10 Critical</span></div>
+          <p class="risk-disclaimer">No weather, soil, or geological network is connected. This score is not a safety assessment.</p>
+        </aside>
+      </section>
+
+      <section class="safety-strip" id="safety-strip" aria-label="Offline and trust status">
+        <div class="safety-icon" aria-hidden="true">⌁</div>
+        <div class="safety-copy"><strong id="safety-title">Offline-ready guide</strong><span id="safety-description">Emergency steps are stored with this app shell. User reports stay on this device.</span></div>
+        <span class="queue-count" id="queue-count">0 LOCAL</span>
+      </section>
+
+      <section class="reports-section" aria-labelledby="reports-title">
+        <div class="reports-heading"><div><p class="section-kicker">COMMUNITY SIGNAL</p><h2 id="reports-title">Hazard reports <span class="demo-count">DEMO</span></h2></div><div class="reports-meta"><span id="report-count">3 sample reports</span><span class="verified-key"><i></i> Confidence is not official verification</span></div></div>
+        <div class="report-filters" role="group" aria-label="Filter reports">
+          <button class="filter-chip" type="button" data-filter="all" aria-pressed="true">All <span id="filter-all-count">3</span></button>
+          <button class="filter-chip" type="button" data-filter="landslide" aria-pressed="false">Landslide</button>
+          <button class="filter-chip" type="button" data-filter="rockfall" aria-pressed="false">Rockfall</button>
+          <button class="filter-chip" type="button" data-filter="roadblock" aria-pressed="false">Road block</button>
+          <button class="filter-chip" type="button" data-filter="flooding" aria-pressed="false">Flooding</button>
+        </div>
+        <div class="incident-list" id="incident-list" aria-live="polite"></div>
+      </section>
+
+      <section class="reputation-strip" aria-label="Community reputation preview">
+        <span class="reputation-emblem" aria-hidden="true">✳</span>
+        <span class="reputation-copy"><strong>Community contributor</strong><small>Points only follow the local demo verification rule.</small></span>
+        <span class="reputation-xp"><strong id="xp-total">0</strong><small>XP</small></span>
+        <span class="reputation-badge" id="reputation-badge">SCOUT</span>
+      </section>
+
+      <nav class="action-dock" aria-label="Quick safety actions">
+        <button class="dock-action report-dock" id="open-report-dock" type="button"><span class="dock-icon">＋</span><span>Report hazard</span></button>
+        <a class="dock-action emergency-dock" href="tel:112"><span class="dock-icon">112</span><span>Emergency</span></a>
+        <button class="dock-action" id="open-guide" type="button"><span class="dock-icon">⌂</span><span>Offline guide</span></button>
+        <button class="dock-action" id="open-route" type="button"><span class="dock-icon">↗</span><span>Route preview</span></button>
+      </nav>
+      <p class="page-disclaimer">Hillguard is a prototype. Sample reports, scores, proximity alerts, and route previews are not live or verified. Call <a href="tel:112">112</a> in India for emergencies; follow official local instructions.</p>
     </main>
-    <script>
-      const resultDisplay = document.querySelector("#result");
-      const expressionDisplay = document.querySelector("#expression");
-      const keys = document.querySelector(".keys");
-      const symbols = { "+": "+", "-": "−", "*": "×", "/": "÷" };
 
-      let current = "0";
-      let previous = null;
-      let operator = null;
-      let shouldReset = false;
+    <dialog class="app-dialog" id="report-dialog" aria-labelledby="report-dialog-title">
+      <form class="dialog-body" id="report-form">
+        <div class="dialog-header"><div><p class="section-kicker">COMMUNITY REPORT</p><h2 id="report-dialog-title">Share what you saw.</h2><p>Only report from a safe place. Your report stays on this device.</p></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
+        <label class="form-field">Hazard type<select name="type" required><option value="landslide">Landslide</option><option value="rockfall">Rockfall</option><option value="roadblock">Road blockage</option><option value="flooding">Flooding</option></select></label>
+        <label class="form-field">Nearby road or landmark<input name="location" maxlength="70" placeholder="e.g. near the bridge or road marker" required></label>
+        <label class="form-field">What did you observe?<textarea name="description" maxlength="240" rows="3" placeholder="Describe visible conditions, not assumptions." required></textarea></label>
+        <label class="form-field">Photo evidence <span class="field-help">Required · captured or selected on this device</span><input id="report-photo" name="photo" type="file" accept="image/*" capture="environment" required></label>
+        <div class="photo-preview" id="photo-preview" hidden></div>
+        <div class="location-capture"><div><strong>Location &amp; time</strong><span id="captured-location">Location not captured</span></div><button class="secondary-button" id="capture-location" type="button">Capture GPS</button></div>
+        <div class="location-capture demo-location-capture"><div><strong>Testing only</strong><span>Use an explicitly labeled sample coordinate instead of GPS.</span></div><button class="text-button" id="use-demo-report-location" type="button">Use sample</button></div>
+        <p class="form-footnote">GPS is only requested when you tap capture. Reports, photos, and coordinates are stored locally; they are not sent or synced to anyone.</p>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog>Cancel</button><button class="primary-button" type="submit">Save on this device</button></div>
+      </form>
+    </dialog>
 
-      function render() {
-        resultDisplay.textContent = current;
-        expressionDisplay.textContent = previous === null
-          ? ""
-          : `${previous} ${symbols[operator] ?? ""}`;
-      }
+    <dialog class="app-dialog compact-dialog" id="guide-dialog" aria-labelledby="guide-title">
+      <div class="dialog-body"><div class="dialog-header"><div><p class="section-kicker">AVAILABLE OFFLINE</p><h2 id="guide-title">If the ground starts moving.</h2><p>General safety reminders only. Follow official local guidance.</p></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
+        <ol class="guide-steps"><li><strong>Move away from the slide path.</strong><span>Get clear of slopes, channels, and debris. Do not approach the edge to look.</span></li><li><strong>Warn others from a safe place.</strong><span>Do not cross moving debris or a flooded road.</span></li><li><strong>Call for help.</strong><span>In India, call 112 when it is safe to do so. Share your location.</span></li><li><strong>Wait for official instructions.</strong><span>Do not return to a slope or road until authorities say it is safe.</span></li></ol>
+        <a class="primary-button full-button" href="tel:112">Call 112 <span aria-hidden="true">↗</span></a>
+      </div>
+    </dialog>
 
-      function enterDigit(digit) {
-        if (shouldReset || current === "Error") {
-          current = digit;
-          shouldReset = false;
-        } else if (current === "0") {
-          current = digit;
-        } else if (current.replace("-", "").length < 14) {
-          current += digit;
-        }
-        render();
-      }
+    <dialog class="app-dialog compact-dialog" id="route-dialog" aria-labelledby="route-title">
+      <div class="dialog-body"><div class="dialog-header"><div><p class="section-kicker">ROUTE PREVIEW · DEMO ONLY</p><h2 id="route-title">Plan with a little room.</h2><p id="route-copy">No directions provider is connected.</p></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
+        <div class="route-preview"><span class="route-line" aria-hidden="true"></span><div><strong>Primary corridor</strong><span>Illustrative NH-27 segment · sample only</span></div></div>
+        <div class="route-preview safer-route"><span class="route-line" aria-hidden="true"></span><div><strong>Safer route option</strong><span>Concept only · not a real alternate route</span></div></div>
+        <p class="form-footnote">This prototype cannot inspect real roads, identify closures, or provide navigable rerouting. Check official road and weather advisories before travel.</p>
+        <button class="secondary-button full-button" type="button" data-close-dialog>Understood</button>
+      </div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-      function enterDecimal() {
-        if (shouldReset || current === "Error") {
-          current = "0.";
-          shouldReset = false;
-        } else if (!current.includes(".")) {
-          current += ".";
-        }
-        render();
-      }
-
-      function calculate(left, right, operation) {
-        switch (operation) {
-          case "+": return left + right;
-          case "-": return left - right;
-          case "*": return left * right;
-          case "/": return right === 0 ? NaN : left / right;
-          default: return right;
-        }
-      }
-
-      function format(value) {
-        if (!Number.isFinite(value)) return "Error";
-        return String(Number(value.toPrecision(10)));
-      }
-
-      function chooseOperator(nextOperator) {
-        if (current === "Error") return;
-        const value = Number(current);
-
-        if (operator && !shouldReset) {
-          current = format(calculate(Number(previous), value, operator));
-          if (current === "Error") {
-            previous = null;
-            operator = null;
-            shouldReset = true;
-            render();
-            return;
-          }
-        }
-
-        previous = current;
-        operator = nextOperator;
-        shouldReset = true;
-        render();
-      }
-
-      function equals() {
-        if (!operator || previous === null || current === "Error") return;
-        const left = previous;
-        const right = current;
-        current = format(calculate(Number(left), Number(right), operator));
-        expressionDisplay.textContent = `${left} ${symbols[operator]} ${right} =`;
-        previous = null;
-        operator = null;
-        shouldReset = true;
-        resultDisplay.textContent = current;
-      }
-
-      function clear() {
-        current = "0";
-        previous = null;
-        operator = null;
-        shouldReset = false;
-        render();
-      }
-
-      function backspace() {
-        if (shouldReset || current === "Error") {
-          current = "0";
-          shouldReset = false;
-        } else {
-          current = current.length > 1
-            ? current.slice(0, -1)
-            : "0";
-          if (current === "-") current = "0";
-        }
-        render();
-      }
-
-      function toggleSign() {
-        if (current === "Error" || Number(current) === 0) return;
-        current = current.startsWith("-") ? current.slice(1) : `-${current}`;
-        shouldReset = false;
-        render();
-      }
-
-      function handleAction(action) {
-        if (action === "clear") clear();
-        if (action === "decimal") enterDecimal();
-        if (action === "backspace") backspace();
-        if (action === "sign") toggleSign();
-        if (action === "equals") equals();
-      }
-
-      keys.addEventListener("click", (event) => {
-        const button = event.target.closest("button");
-        if (!button) return;
-
-        if (button.dataset.digit !== undefined) enterDigit(button.dataset.digit);
-        if (button.dataset.operator) chooseOperator(button.dataset.operator);
-        if (button.dataset.action) handleAction(button.dataset.action);
-      });
-
-      document.addEventListener("keydown", (event) => {
-        if (/^\d$/.test(event.key)) enterDigit(event.key);
-        else if (event.key === ".") enterDecimal();
-        else if (["+", "-", "*", "/"].includes(event.key)) chooseOperator(event.key);
-        else if (event.key === "Enter" || event.key === "=") {
-          event.preventDefault();
-          equals();
-        } else if (event.key === "Escape") clear();
-        else if (event.key === "Backspace") backspace();
-      });
-    </script>
+    <script src="/app.js" defer></script>
   </body>
 </html>
