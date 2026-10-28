@@ -1,4 +1,4 @@
-const CACHE_NAME = "hillguard-app-shell-v2";
+const CACHE_NAME = "hillguard-app-shell-v7";
 const APP_SHELL = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

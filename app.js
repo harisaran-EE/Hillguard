@@ -5,6 +5,13 @@ const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 const CLUSTER_RADIUS_KM = 2;
 const CLUSTER_WINDOW_MS = 60 * 60 * 1000;
 const GEOFENCE_RADIUS_KM = 5;
+const SAMPLE_WEATHER_LABEL = "Guwahati area · sample location";
+const WEATHER_CACHE_KEY = "hillguard-weather-sample-v2";
+const WEATHER_CACHE_TTL_MS = 30 * 60 * 1000;
+const WEATHER_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+const WEATHER_REQUEST_TIMEOUT_MS = 12000;
+const RAIN_MAP_GRID_STEP_DEGREES = 0.12;
+const RAIN_MAP_SPOT_RADIUS_METERS = 7000;
 const SAMPLE_LOCATION = { latitude: 26.141, longitude: 91.735 };
 const SAMPLE_HAZARDS = [
   { latitude: 26.1698, longitude: 91.735, label: "NH-27 · sample slope report", type: "landslide" },
@@ -13,15 +20,11 @@ const SAMPLE_HAZARDS = [
 
 const typeNames = {
   landslide: "Landslide",
-  rockfall: "Rockfall",
-  roadblock: "Road blockage",
-  flooding: "Flooding"
+  roadblock: "Road block"
 };
 const typeSymbols = {
   landslide: "⌁",
-  rockfall: "△",
-  roadblock: "⊘",
-  flooding: "≈"
+  roadblock: "⊘"
 };
 const sampleReports = [
   {
@@ -45,19 +48,16 @@ const sampleReports = [
     status: "Sample · medium",
     confidence: "Medium confidence",
     confidenceLevel: "medium"
-  },
-  {
-    id: "sample-3",
-    type: "rockfall",
-    location: "Upper pass",
-    distance: "11.4 km · sample",
-    time: "EXAMPLE REPORT",
-    description: "Fictional marker to demonstrate report categories and confidence colors.",
-    status: "Sample · threshold",
-    confidence: "Threshold · demo",
-    confidenceLevel: "verified"
   }
 ];
+const THUNDERSTORM_CODES = new Set([95, 96, 99]);
+const RAIN_WEATHER_CODES = new Set([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, ...THUNDERSTORM_CODES]);
+const RAINFALL_COLORS = {
+  drizzle: "#10b981",
+  moderate: "#f59e0b",
+  rain: "#f97316",
+  heavy: "#ef4444"
+};
 
 const elements = {
   connectivity: document.querySelector("#connectivity"),
@@ -66,15 +66,13 @@ const elements = {
   safetyDescription: document.querySelector("#safety-description"),
   queueCount: document.querySelector("#queue-count"),
   locationSummary: document.querySelector("#location-summary"),
-  mapLocationLabel: document.querySelector("#map-location-label"),
+  rainMap: document.querySelector("#rain-map"),
+  rainMapStatus: document.querySelector("#rain-map-status"),
   hazardAlert: document.querySelector("#hazard-alert"),
   alertCopy: document.querySelector("#alert-copy"),
   incidentList: document.querySelector("#incident-list"),
   reportCount: document.querySelector("#report-count"),
   filterAllCount: document.querySelector("#filter-all-count"),
-  riskScore: document.querySelector("#risk-score"),
-  riskScoreWrap: document.querySelector("#risk-score-wrap"),
-  riskLevel: document.querySelector("#risk-level"),
   reportDialog: document.querySelector("#report-dialog"),
   guideDialog: document.querySelector("#guide-dialog"),
   routeDialog: document.querySelector("#route-dialog"),
@@ -84,7 +82,15 @@ const elements = {
   capturedLocation: document.querySelector("#captured-location"),
   toast: document.querySelector("#toast"),
   xpTotal: document.querySelector("#xp-total"),
-  reputationBadge: document.querySelector("#reputation-badge")
+  reputationBadge: document.querySelector("#reputation-badge"),
+  weatherCondition: document.querySelector("#weather-condition"),
+  weatherLocation: document.querySelector("#weather-location"),
+  weatherState: document.querySelector("#weather-state"),
+  weatherUpdated: document.querySelector("#weather-updated"),
+  rainAmount: document.querySelector("#rain-amount"),
+  rainAmountLabel: document.querySelector("#rain-amount-label"),
+  rainLevel: document.querySelector("#rain-level"),
+  weatherRefresh: document.querySelector("#refresh-weather")
 };
 
 let database;
@@ -95,6 +101,46 @@ let capturedReportLocation = null;
 let photoPreviewUrl = null;
 let toastTimeout;
 let installPrompt;
+let weatherRequestId = 0;
+let weatherAbortController = null;
+let currentWeather = null;
+let rainfallMap;
+let rainfallMapLayer;
+let rainfallCenterMarker;
+
+function applyTheme(theme) {
+  const isDark = theme === "dark";
+  document.documentElement.dataset.theme = isDark ? "dark" : "bright";
+  const toggle = document.querySelector("#theme-toggle");
+  const label = isDark ? "Switch to bright mode" : "Switch to dark mode";
+  toggle.setAttribute("aria-label", label);
+  toggle.setAttribute("title", label);
+  toggle.setAttribute("aria-pressed", String(isDark));
+  document.querySelector("#theme-label").textContent = isDark ? "Bright mode" : "Dark mode";
+  document.querySelector('meta[name="theme-color"]').content = isDark ? "#111a29" : "#1e293b";
+}
+
+function getSavedTheme() {
+  try {
+    return localStorage.getItem("hillguard-theme") === "dark" ? "dark" : "bright";
+  } catch (error) {
+    console.warn("Could not read the saved color theme.", error);
+    return "bright";
+  }
+}
+
+applyTheme(getSavedTheme());
+
+document.querySelector("#theme-toggle").addEventListener("click", () => {
+  const theme = document.documentElement.dataset.theme === "dark" ? "bright" : "dark";
+  applyTheme(theme);
+  try {
+    localStorage.setItem("hillguard-theme", theme);
+  } catch (error) {
+    console.error("Could not save the color theme preference.", error);
+    showToast("Theme changed, but this browser could not save your preference.");
+  }
+});
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -318,21 +364,392 @@ function updateGeofenceAlert() {
   elements.hazardAlert.hidden = false;
 }
 
-function updateRiskScore() {
-  const rainfall = Number(document.querySelector("#rainfall-input").value);
-  const slope = Number(document.querySelector("#slope-input").value);
-  const history = Number(document.querySelector("#history-input").value);
-  const score = Math.max(1, Math.min(10, rainfall + slope + history));
-  let level;
+function getWeatherLocationKey(location) {
+  return `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
+}
 
-  if (score <= 3) level = { id: "safe", label: "LOW · SAMPLE" };
-  else if (score <= 6) level = { id: "watch", label: "MODERATE · SAMPLE" };
-  else if (score <= 8) level = { id: "high", label: "HIGH · SAMPLE" };
-  else level = { id: "critical", label: "CRITICAL · SAMPLE" };
+function getRainfallGridCoordinates(location) {
+  const longitudeStep = RAIN_MAP_GRID_STEP_DEGREES / Math.cos(location.latitude * Math.PI / 180);
+  return [-1, 0, 1].flatMap((latitudeOffset) =>
+    [-1, 0, 1].map((longitudeOffset) => ({
+      latitude: location.latitude + latitudeOffset * RAIN_MAP_GRID_STEP_DEGREES,
+      longitude: location.longitude + longitudeOffset * longitudeStep
+    }))
+  );
+}
 
-  elements.riskScore.textContent = String(score);
-  elements.riskLevel.textContent = level.label;
-  elements.riskScoreWrap.dataset.level = level.id;
+function setRainMapStatus(message) {
+  elements.rainMapStatus.textContent = message;
+}
+
+function initializeRainMap() {
+  if (!window.L) {
+    setRainMapStatus("The map could not load. Rain estimates are still shown below.");
+    return;
+  }
+
+  rainfallMap = window.L.map(elements.rainMap, {
+    center: [SAMPLE_LOCATION.latitude, SAMPLE_LOCATION.longitude],
+    zoom: 9,
+    scrollWheelZoom: false
+  });
+  window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+  }).addTo(rainfallMap);
+  rainfallMapLayer = window.L.layerGroup().addTo(rainfallMap);
+  rainfallCenterMarker = window.L.circleMarker(
+    [SAMPLE_LOCATION.latitude, SAMPLE_LOCATION.longitude],
+    { radius: 6, color: "#fff", weight: 2, fillColor: "#2563eb", fillOpacity: 1 }
+  ).addTo(rainfallMap);
+  rainfallCenterMarker.bindPopup("Sample weather-map center · Guwahati area");
+  rainfallMap.whenReady(() => window.setTimeout(() => rainfallMap.invalidateSize(), 0));
+}
+
+function centerRainfallMap(location, label, zoom = 9) {
+  if (!rainfallMap) return;
+  rainfallMap.setView([location.latitude, location.longitude], zoom);
+  rainfallCenterMarker.setLatLng([location.latitude, location.longitude]);
+  rainfallCenterMarker.bindPopup(`${label} · rainfall map center`);
+}
+
+function isValidWeatherReading(reading) {
+  return Number.isFinite(reading?.rainfallMm)
+    && reading.rainfallMm >= 0
+    && Number.isFinite(reading?.intervalSeconds)
+    && reading.intervalSeconds > 0
+    && Number.isFinite(reading?.observedAtSeconds)
+    && Number.isFinite(reading?.fetchedAtMs)
+    && (reading.weatherCode === null || Number.isFinite(reading.weatherCode))
+    && Array.isArray(reading.rainMapReadings)
+    && reading.rainMapReadings.length === 9
+    && reading.rainMapReadings.every((point) =>
+      Number.isFinite(point.latitude)
+        && Number.isFinite(point.longitude)
+        && Number.isFinite(point.rainfallMm)
+        && point.rainfallMm >= 0
+        && Number.isFinite(point.intervalSeconds)
+        && point.intervalSeconds > 0
+        && Number.isFinite(point.observedAtSeconds)
+        && (point.weatherCode === null || Number.isFinite(point.weatherCode))
+    );
+}
+
+function readSampleWeatherCache() {
+  try {
+    const stored = localStorage.getItem(WEATHER_CACHE_KEY);
+    if (!stored) return null;
+
+    const reading = JSON.parse(stored);
+    if (
+      reading.locationKey !== getWeatherLocationKey(SAMPLE_LOCATION)
+      || !isValidWeatherReading(reading)
+    ) {
+      throw new Error("The saved weather reading has an invalid format.");
+    }
+    return reading;
+  } catch (error) {
+    console.error("Could not read the cached sample weather estimate.", error);
+    elements.weatherState.dataset.state = "error";
+    elements.weatherState.textContent = "Saved weather cache could not be read.";
+    return null;
+  }
+}
+
+function calculateRainfallIntensity(reading) {
+  const rate = reading.rainfallMm * 3600 / reading.intervalSeconds;
+  const score = reading.rainfallMm <= 0.01 ? 0 : Math.min(10, Math.ceil(rate / 2));
+  const level = score === 0
+    ? THUNDERSTORM_CODES.has(reading.weatherCode)
+      ? { id: "heavy", label: "Thunderstorm indicated" }
+      : RAIN_WEATHER_CODES.has(reading.weatherCode)
+        ? { id: "drizzle", label: "Drizzle" }
+        : { id: "dry", label: "Dry" }
+    : rate <= 2.5
+      ? { id: "drizzle", label: "Drizzle" }
+      : rate <= 7.5
+        ? { id: "moderate", label: "Moderate" }
+        : rate <= 15
+          ? { id: "rain", label: "Rain" }
+          : { id: "heavy", label: "Heavy" };
+
+  return { score, level };
+}
+
+function getRainfallCategory(reading) {
+  const intensity = calculateRainfallIntensity(reading);
+  return {
+    ...intensity,
+    rate: reading.rainfallMm * 3600 / reading.intervalSeconds,
+    isThunderstorm: THUNDERSTORM_CODES.has(reading.weatherCode)
+  };
+}
+
+function renderRainfallMap(reading, stale) {
+  if (!rainfallMap || !rainfallMapLayer) return;
+
+  rainfallMapLayer.clearLayers();
+  let visibleSpots = 0;
+  let stormSpots = 0;
+
+  for (const point of reading.rainMapReadings) {
+    const category = getRainfallCategory(point);
+    if (category.level.id === "dry" && !category.isThunderstorm) continue;
+
+    const color = RAINFALL_COLORS[category.level.id] ?? RAINFALL_COLORS.drizzle;
+    window.L.circle([point.latitude, point.longitude], {
+      radius: RAIN_MAP_SPOT_RADIUS_METERS,
+      color,
+      weight: category.isThunderstorm ? 2 : 1,
+      opacity: stale ? 0.35 : 0.65,
+      fillColor: color,
+      fillOpacity: stale ? 0.08 : 0.2
+    }).addTo(rainfallMapLayer);
+
+    const amount = point.rainfallMm.toFixed(2);
+    const description = category.isThunderstorm
+      ? `Thunderstorm indicated · ${amount} mm in the latest model interval`
+      : `${category.level.label} · ${amount} mm in the latest model interval`;
+    const popup = window.L.popup().setContent(
+      `${description}<br><small>Approximate model estimate · not an official alert</small>`
+    );
+    if (category.isThunderstorm) {
+      const stormIcon = window.L.divIcon({
+        className: "storm-map-marker",
+        html: '<span aria-label="Thunderstorm indicated">⚠</span>',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+      window.L.marker([point.latitude, point.longitude], { icon: stormIcon })
+        .bindPopup(popup)
+        .addTo(rainfallMapLayer);
+      stormSpots += 1;
+    }
+
+    visibleSpots += 1;
+  }
+
+  if (visibleSpots === 0) {
+    setRainMapStatus(stale
+      ? "No rain indicated in the saved sample points · this does not guarantee clear conditions."
+      : "No rain indicated at sampled points · this does not guarantee clear conditions.");
+  } else {
+    const stormText = stormSpots > 0
+      ? ` · ${stormSpots} thunderstorm signal${stormSpots === 1 ? "" : "s"}`
+      : "";
+    setRainMapStatus(
+      `${stale ? "Saved, possibly stale estimate" : "Approximate model estimate"} · ${visibleSpots} rainfall spot${visibleSpots === 1 ? "" : "s"}${stormText}`
+    );
+  }
+}
+
+function renderWeather(reading, { cached = false, stale = false, status = "" } = {}) {
+  const amount = reading.rainfallMm;
+  const intensity = calculateRainfallIntensity(reading);
+  const ageMs = Date.now() - reading.observedAtSeconds * 1000;
+  const cacheAgeMs = Date.now() - reading.fetchedAtMs;
+  const isStale = stale
+    || !navigator.onLine
+    || cacheAgeMs > WEATHER_CACHE_TTL_MS
+    || ageMs > WEATHER_STALE_AFTER_MS
+    || ageMs < -WEATHER_REQUEST_TIMEOUT_MS;
+  const rainIndicated = amount > 0.01
+    || RAIN_WEATHER_CODES.has(reading.weatherCode)
+    || THUNDERSTORM_CODES.has(reading.weatherCode);
+  const condition = amount > 0.01
+    ? "Rain indicated"
+    : THUNDERSTORM_CODES.has(reading.weatherCode)
+      ? "Thunderstorm indicated by model"
+      : rainIndicated
+      ? "Rain conditions · trace indicated"
+      : "No rain indicated in latest interval";
+  const intervalMinutes = Math.max(1, Math.round(reading.intervalSeconds / 60));
+  const updatedAt = new Date(reading.fetchedAtMs).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+  const modelTime = new Date(reading.observedAtSeconds * 1000).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+  elements.weatherCondition.textContent = isStale ? `Stale estimate · ${condition.toLowerCase()}` : condition;
+  elements.rainAmount.textContent = amount.toFixed(2);
+  elements.rainAmountLabel.textContent = `Precipitation · last ${intervalMinutes} min`;
+  elements.rainLevel.textContent = isStale
+    ? `Stale · ${intensity.level.label}`
+    : intensity.level.label;
+  elements.rainLevel.dataset.level = isStale ? "unknown" : intensity.level.id;
+
+  elements.weatherUpdated.textContent = `Fetched ${updatedAt} · model interval ${modelTime}`;
+  elements.weatherState.dataset.state = isStale ? "stale" : "ready";
+  elements.weatherState.textContent = status || (
+    isStale
+      ? navigator.onLine
+        ? "Stale estimate · refresh for an update"
+        : "Offline · saved estimate may be stale"
+      : cached
+        ? "Cached Open-Meteo estimate"
+        : "Open-Meteo forecast-model estimate"
+  );
+  renderRainfallMap(reading, isStale);
+}
+
+function setWeatherUnavailable(message, isError = false) {
+  elements.weatherCondition.textContent = "Weather unavailable";
+  elements.rainAmount.textContent = "—";
+  elements.rainAmountLabel.textContent = "Precipitation · latest interval";
+  elements.rainLevel.textContent = "Unknown";
+  elements.rainLevel.dataset.level = "unavailable";
+  elements.weatherState.dataset.state = isError ? "error" : "loading";
+  elements.weatherState.textContent = message;
+  elements.weatherUpdated.textContent = "No current reading";
+  if (rainfallMapLayer) rainfallMapLayer.clearLayers();
+  setRainMapStatus(rainfallMap ? message : `Map unavailable · ${message}`);
+}
+
+async function fetchWeatherReading(location, signal) {
+  const coordinates = getRainfallGridCoordinates(location);
+  const url = new URL("https://api.open-meteo.com/v1/forecast");
+  url.search = new URLSearchParams({
+    latitude: coordinates.map((point) => point.latitude.toFixed(4)).join(","),
+    longitude: coordinates.map((point) => point.longitude.toFixed(4)).join(","),
+    current: "rain,showers,weather_code",
+    timezone: "GMT",
+    timeformat: "unixtime"
+  }).toString();
+
+  const response = await fetch(url, { signal, cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Weather service returned HTTP ${response.status}.`);
+  }
+
+  const payload = await response.json();
+  const locations = Array.isArray(payload) ? payload : [payload];
+  if (locations.length !== coordinates.length) {
+    throw new Error("Weather service returned an incomplete reading.");
+  }
+
+  const fetchedAtMs = Date.now();
+  const rainMapReadings = locations.map((locationData) => {
+    const current = locationData.current;
+    const rain = current?.rain;
+    const showers = current?.showers;
+    if (
+      !Number.isFinite(locationData.latitude)
+      || !Number.isFinite(locationData.longitude)
+      || !Number.isFinite(rain)
+      || !Number.isFinite(showers)
+      || !Number.isFinite(current.interval)
+      || !Number.isFinite(current.time)
+      || (current.weather_code !== null && !Number.isFinite(current.weather_code))
+    ) {
+      throw new Error("Weather service returned an incomplete reading.");
+    }
+
+    return {
+      latitude: locationData.latitude,
+      longitude: locationData.longitude,
+      rainfallMm: Math.max(0, rain + showers),
+      intervalSeconds: current.interval,
+      observedAtSeconds: current.time,
+      weatherCode: current.weather_code
+    };
+  });
+  const centerReading = rainMapReadings[4];
+  const reading = {
+    locationKey: getWeatherLocationKey(location),
+    rainfallMm: centerReading.rainfallMm,
+    intervalSeconds: centerReading.intervalSeconds,
+    observedAtSeconds: centerReading.observedAtSeconds,
+    weatherCode: centerReading.weatherCode,
+    fetchedAtMs,
+    rainMapReadings
+  };
+  reading.rainIntensityScore = calculateRainfallIntensity(reading).score;
+  return reading;
+}
+
+async function refreshWeather(location, label, mode, force = false) {
+  const requestId = ++weatherRequestId;
+  if (weatherAbortController) weatherAbortController.abort();
+
+  const locationKey = getWeatherLocationKey(location);
+  const sampleCache = mode === "sample" ? readSampleWeatherCache() : null;
+  const matchingCache = currentWeather?.reading.locationKey === locationKey
+    ? currentWeather.reading
+    : sampleCache?.locationKey === locationKey
+      ? sampleCache
+      : null;
+
+  elements.weatherLocation.textContent = label;
+  if (matchingCache) {
+    renderWeather(matchingCache, { cached: true });
+    if (!force && Date.now() - matchingCache.fetchedAtMs < WEATHER_CACHE_TTL_MS) return;
+  } else {
+    setWeatherUnavailable(navigator.onLine ? "Connecting to weather service…" : "No saved reading for this location while offline.");
+  }
+
+  if (!navigator.onLine) {
+    if (!matchingCache) {
+      setWeatherUnavailable("Offline · no cached reading for this location.");
+    } else {
+      renderWeather(matchingCache, { cached: true, stale: true, status: "Offline · showing saved estimate" });
+    }
+    return;
+  }
+
+  weatherAbortController = new AbortController();
+  const controller = new AbortController();
+  weatherAbortController = controller;
+  const timeout = window.setTimeout(
+    () => controller.abort(new DOMException("Weather request timed out.", "TimeoutError")),
+    WEATHER_REQUEST_TIMEOUT_MS
+  );
+  elements.weatherRefresh.disabled = true;
+  elements.weatherState.dataset.state = "loading";
+  elements.weatherState.textContent = matchingCache
+    ? "Refreshing weather estimate…"
+    : "Connecting to weather service…";
+
+  try {
+    const reading = await fetchWeatherReading(location, controller.signal);
+    if (requestId !== weatherRequestId) return;
+    currentWeather = { reading, locationMode: mode };
+
+    if (mode === "sample") {
+      try {
+        localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify(reading));
+      } catch (error) {
+        console.error("Could not cache the sample weather estimate for offline use.", error);
+        renderWeather(reading, { status: "Live estimate · browser cache unavailable" });
+        return;
+      }
+    }
+
+    renderWeather(reading);
+  } catch (error) {
+    if (requestId !== weatherRequestId) return;
+    if (matchingCache) {
+      renderWeather(matchingCache, {
+        cached: true,
+        stale: true,
+        status: `Refresh failed · showing saved estimate (${error.message})`
+      });
+      console.error("Could not refresh the weather estimate; showing cached data.", error);
+    } else {
+      const message = error.name === "AbortError" || error.name === "TimeoutError"
+        ? "Weather request timed out. Try refreshing."
+        : `Weather service unavailable: ${error.message}`;
+      setWeatherUnavailable(message, true);
+      console.error("Could not retrieve a weather estimate.", error);
+    }
+  } finally {
+    window.clearTimeout(timeout);
+    if (requestId === weatherRequestId) {
+      elements.weatherRefresh.disabled = false;
+      weatherAbortController = null;
+    }
+  }
 }
 
 function openRoutePreview() {
@@ -358,8 +775,9 @@ function showToast(message) {
 function setCurrentLocation(location, label, mode) {
   currentLocation = { ...location, mode };
   elements.locationSummary.textContent = label;
-  elements.mapLocationLabel.textContent = label;
+  centerRainfallMap(location, mode === "sample" ? "Sample location" : "Your location");
   updateGeofenceAlert();
+  void refreshWeather(location, label, mode);
 }
 
 function captureGps() {
@@ -405,6 +823,18 @@ async function handleReportSubmit(event) {
   if (!elements.reportForm.reportValidity()) return;
 
   const formData = new FormData(elements.reportForm);
+  const type = String(formData.get("type"));
+  if (!["landslide", "roadblock"].includes(type)) {
+    showToast("Choose landslide or road block to submit a report.");
+    return;
+  }
+  const location = String(formData.get("location")).trim();
+  const description = String(formData.get("description")).trim();
+  if (!location || !description) {
+    showToast("Add a nearby place and a short description of what you saw.");
+    return;
+  }
+
   const photo = elements.reportPhoto.files[0];
   if (!photo || !photo.type.startsWith("image/")) {
     showToast("Choose an image photo before saving the report.");
@@ -421,9 +851,9 @@ async function handleReportSubmit(event) {
 
   const report = {
     id: crypto.randomUUID(),
-    type: String(formData.get("type")),
-    location: String(formData.get("location")).trim(),
-    description: String(formData.get("description")).trim(),
+    type,
+    location,
+    description,
     latitude: capturedReportLocation.latitude,
     longitude: capturedReportLocation.longitude,
     locationMode: capturedReportLocation.mode,
@@ -479,7 +909,6 @@ document.querySelector("#open-report-dock").addEventListener("click", () => {
 });
 document.querySelector("#open-guide").addEventListener("click", () => elements.guideDialog.showModal());
 document.querySelector("#open-route").addEventListener("click", openRoutePreview);
-document.querySelector("#route-action").addEventListener("click", openRoutePreview);
 
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   button.addEventListener("click", () => button.closest("dialog").close());
@@ -541,15 +970,40 @@ document.querySelector(".report-filters").addEventListener("click", (event) => {
 elements.reportPhoto.addEventListener("change", showPhotoPreview);
 elements.reportForm.addEventListener("submit", handleReportSubmit);
 
-["#rainfall-input", "#slope-input", "#history-input"].forEach((selector) => {
-  document.querySelector(selector).addEventListener("change", updateRiskScore);
-});
-
 window.addEventListener("online", () => {
   updateConnectivity();
   showToast("Connection restored. Local reports are still on this device; server sync is not configured.");
+  const location = getLocalLocation() ?? { ...SAMPLE_LOCATION, mode: "sample" };
+  const label = currentLocation?.mode === "gps"
+    ? "GPS location active"
+    : currentLocation
+      ? "Sample location · demo only"
+      : SAMPLE_WEATHER_LABEL;
+  void refreshWeather(location, label, currentLocation?.mode ?? "sample");
 });
-window.addEventListener("offline", updateConnectivity);
+window.addEventListener("offline", () => {
+  updateConnectivity();
+  const reading = currentWeather?.reading ?? readSampleWeatherCache();
+  if (reading) {
+    renderWeather(reading, { cached: true, stale: true, status: "Offline · showing last retrieved model estimate" });
+  } else {
+    setWeatherUnavailable("Offline · no cached weather reading is available.");
+  }
+});
+
+window.setInterval(() => {
+  if (
+    currentWeather
+    && Date.now() - currentWeather.reading.fetchedAtMs > WEATHER_CACHE_TTL_MS
+    && elements.weatherState.dataset.state === "ready"
+  ) {
+    renderWeather(currentWeather.reading, {
+      cached: true,
+      stale: true,
+      status: "Estimate is over 30 minutes old · refresh for an update"
+    });
+  }
+}, 60000);
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -572,10 +1026,26 @@ window.addEventListener("appinstalled", () => {
 });
 
 updateConnectivity();
-updateRiskScore();
 renderReports();
 renderReputation();
 renderQueueCount();
+
+initializeRainMap();
+const savedWeather = readSampleWeatherCache();
+if (savedWeather) {
+  renderWeather(savedWeather, { cached: true });
+}
+void refreshWeather(SAMPLE_LOCATION, SAMPLE_WEATHER_LABEL, "sample");
+
+elements.weatherRefresh.addEventListener("click", () => {
+  const location = getLocalLocation() ?? { ...SAMPLE_LOCATION, mode: "sample" };
+  const label = currentLocation?.mode === "gps"
+    ? "GPS location active"
+    : currentLocation
+      ? "Sample location · demo only"
+      : SAMPLE_WEATHER_LABEL;
+  void refreshWeather(location, label, currentLocation?.mode ?? "sample", true);
+});
 
 openDatabase()
   .then((openedDatabase) => {
