@@ -123,6 +123,14 @@
           <div class="weather-actions"><a class="weather-source" href="https://open-meteo.com/en/docs" target="_blank" rel="noopener noreferrer">Open-Meteo · CC BY 4.0 ↗</a><button class="weather-refresh" id="refresh-weather" type="button" aria-label="Refresh weather estimate">Refresh</button></div>
         </div>
         <p class="weather-disclaimer">Forecast-model estimate for this location and time interval, not a rain gauge or official alert. A clear reading does not mean slopes or roads are safe. Weather may be unavailable or delayed.</p>
+        <section class="conditions-ai" aria-labelledby="conditions-ai-title">
+          <div class="conditions-ai-heading"><strong id="conditions-ai-title">AI conditions summary</strong><span>Experimental · not an alert or safety assessment</span></div>
+          <label class="conditions-ai-consent"><input id="conditions-ai-consent" type="checkbox"> I agree to send the displayed rainfall estimate and regional USGS earthquake count to Google Gemini for a short summary. No coordinates or local reports are sent.</label>
+          <button class="weather-refresh conditions-ai-button" id="generate-conditions-summary" type="button" disabled>Generate summary</button>
+          <p class="conditions-ai-status" id="conditions-ai-status" role="status" aria-live="polite">AI summary is optional. Check consent to enable it.</p>
+          <p class="conditions-ai-output" id="conditions-ai-output" aria-live="polite"></p>
+          <p class="conditions-ai-disclaimer">AI can be wrong. This summary describes available data only; it cannot predict hazards or replace official warnings.</p>
+        </section>
       </section>
 
       <section class="safety-strip" id="safety-strip" aria-label="Offline and trust status">

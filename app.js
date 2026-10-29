@@ -104,6 +104,10 @@ const elements = {
   rainAmountLabel: document.querySelector("#rain-amount-label"),
   rainLevel: document.querySelector("#rain-level"),
   weatherRefresh: document.querySelector("#refresh-weather"),
+  conditionsAiConsent: document.querySelector("#conditions-ai-consent"),
+  conditionsAiButton: document.querySelector("#generate-conditions-summary"),
+  conditionsAiStatus: document.querySelector("#conditions-ai-status"),
+  conditionsAiOutput: document.querySelector("#conditions-ai-output"),
   contactState: document.querySelector("#contact-state"),
   contactDistrict: document.querySelector("#contact-district"),
   contactDirectoryStatus: document.querySelector("#contact-directory-status"),
@@ -132,6 +136,112 @@ let earthquakeFetchError = "";
 let earthquakeCacheError = "";
 let earthquakeAbortController = null;
 let earthquakeRequestId = 0;
+let conditionsSummaryRequestId = 0;
+let conditionsSummaryBusy = false;
+let lastConditionsSummaryInputKey = "";
+
+function getConditionsSummaryInput() {
+  const weatherState = elements.weatherState.dataset.state;
+  const weatherAvailable = Boolean(currentWeather)
+    && ["ready", "stale"].includes(weatherState);
+  const rainfallIntensity = elements.rainLevel.dataset.level;
+  const earthquakesAvailable = earthquakeFetchedAtMs > 0;
+  const now = Date.now();
+
+  return {
+    consent: true,
+    weather: {
+      available: weatherAvailable,
+      intensity: ["dry", "drizzle", "moderate", "rain", "heavy"].includes(rainfallIntensity)
+        ? rainfallIntensity
+        : "unknown",
+      precipitationMm: weatherAvailable ? currentWeather.reading.rainfallMm : null,
+      intervalMinutes: weatherAvailable
+        ? Math.max(1, Math.round(currentWeather.reading.intervalSeconds / 60))
+        : null,
+      stale: weatherAvailable && weatherState === "stale"
+    },
+    earthquakes: {
+      available: earthquakesAvailable,
+      eventCount: earthquakesAvailable
+        ? earthquakeEvents.filter((event) =>
+          event.time >= now - HAZARD_HISTORY_WINDOW_MS && event.time <= now
+        ).length
+        : null,
+      stale: earthquakesAvailable && (
+        Boolean(earthquakeFetchError)
+        || now - earthquakeFetchedAtMs > EARTHQUAKE_REFRESH_INTERVAL_MS
+      )
+    }
+  };
+}
+
+function updateConditionsSummaryAvailability() {
+  const summaryInput = getConditionsSummaryInput();
+  const inputKey = JSON.stringify(summaryInput);
+  if (lastConditionsSummaryInputKey && inputKey !== lastConditionsSummaryInputKey) {
+    lastConditionsSummaryInputKey = "";
+    elements.conditionsAiOutput.textContent = "";
+    elements.conditionsAiStatus.textContent = "Displayed data changed. Generate a fresh summary.";
+  }
+  const hasData = summaryInput.weather.available || summaryInput.earthquakes.available;
+  elements.conditionsAiButton.disabled = conditionsSummaryBusy
+    || !elements.conditionsAiConsent.checked
+    || !hasData;
+  if (!hasData && !elements.conditionsAiOutput.textContent) {
+    elements.conditionsAiStatus.textContent = "Waiting for weather or USGS data before a summary can be generated.";
+  } else if (hasData && !elements.conditionsAiConsent.checked && !elements.conditionsAiOutput.textContent) {
+    elements.conditionsAiStatus.textContent = "AI summary is optional. Check consent to enable it.";
+  }
+}
+
+async function generateConditionsSummary() {
+  if (!elements.conditionsAiConsent.checked) return;
+  const input = getConditionsSummaryInput();
+  if (!input.weather.available && !input.earthquakes.available) {
+    elements.conditionsAiStatus.textContent = "No weather or USGS data is available to summarize.";
+    return;
+  }
+
+  const requestId = ++conditionsSummaryRequestId;
+  const inputKey = JSON.stringify(input);
+  conditionsSummaryBusy = true;
+  elements.conditionsAiButton.disabled = true;
+  elements.conditionsAiStatus.textContent = "Generating a summary from the displayed data…";
+  elements.conditionsAiOutput.textContent = "";
+
+  try {
+    const response = await fetch("/api/summarize-conditions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input)
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || `AI summary returned HTTP ${response.status}.`);
+    }
+    if (typeof result.summary !== "string" || !result.summary.trim() || result.summary.length > 500) {
+      throw new Error("AI summary returned an invalid response.");
+    }
+    if (requestId !== conditionsSummaryRequestId) return;
+    if (JSON.stringify(getConditionsSummaryInput()) !== inputKey) {
+      elements.conditionsAiStatus.textContent = "The displayed data changed while generating. Generate a fresh summary.";
+      return;
+    }
+    lastConditionsSummaryInputKey = inputKey;
+    elements.conditionsAiOutput.textContent = result.summary.trim();
+    elements.conditionsAiStatus.textContent = "Summary generated from the data available when requested.";
+  } catch (error) {
+    if (requestId !== conditionsSummaryRequestId) return;
+    console.error("Could not generate the AI conditions summary.", error);
+    elements.conditionsAiStatus.textContent = error.message;
+  } finally {
+    if (requestId === conditionsSummaryRequestId) {
+      conditionsSummaryBusy = false;
+      updateConditionsSummaryAvailability();
+    }
+  }
+}
 
 function applyTheme(theme) {
   const isDark = theme === "dark";
@@ -840,6 +950,7 @@ function renderHazardActivity() {
   }
 
   formatHazardStatus();
+  updateConditionsSummaryAvailability();
 }
 
 async function refreshEarthquakeHistory(force = false) {
@@ -1100,6 +1211,7 @@ function renderWeather(reading, { cached = false, stale = false, status = "" } =
         : "Open-Meteo forecast-model estimate"
   );
   renderRainfallMap(reading, isStale);
+  updateConditionsSummaryAvailability();
   renderHazardActivity();
 }
 
@@ -1586,6 +1698,11 @@ document.querySelector("#reference-location").addEventListener("click", () => {
 
 elements.hazardRefresh.addEventListener("click", () => {
   void refreshEarthquakeHistory(true);
+});
+
+elements.conditionsAiConsent.addEventListener("change", updateConditionsSummaryAvailability);
+elements.conditionsAiButton.addEventListener("click", () => {
+  void generateConditionsSummary();
 });
 
 document.querySelector(".report-filters").addEventListener("click", (event) => {

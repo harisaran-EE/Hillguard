@@ -52,6 +52,10 @@ localhost or HTTPS. On mobile, deploy to HTTPS to install the PWA.
 - Optional, unchecked-by-default Gemini image triage. With consent, a resized
   photo, category, and description are sent to the Vercel API; GPS coordinates
   are not sent. Triage returns a cautious visual suggestion, not a verification.
+- Optional Gemini conditions summary. With consent, only the displayed
+  rainfall estimate and aggregate regional USGS earthquake count are sent;
+  coordinates and locally stored community reports are not included. The
+  generated text is not an alert, forecast, or safety assessment.
 - Reputation counts only human-approved reports with captured GPS, with
   Guardian at 5 and Saviour at 20. Reference-location reports do not count.
   Human moderation and shared report storage are not configured, so new report
@@ -151,16 +155,16 @@ to confirm.
 
 Import the repository into Vercel and use the repository root. No framework
 preset, build command, or output directory is required. Vercel HTTPS enables
-PWA installation and offline app-shell caching. The `/api/review-report`
-function is available on Vercel deployments; serving the files with
-`python -m http.server` does not run that API.
+PWA installation and offline app-shell caching. The `/api/review-report` and
+`/api/summarize-conditions` functions are available on Vercel deployments;
+serving the files with `python -m http.server` does not run those APIs.
 
-To enable optional AI triage, add `GEMINI_API_KEY` as a Vercel project
+To enable optional AI features, add `GEMINI_API_KEY` as a Vercel project
 environment variable and redeploy. Create the key in Google AI Studio; never
 put it in client-side files or commit it to the repository. The function uses
 `gemini-3.1-flash-lite` by default. `GEMINI_MODEL` may optionally override the
-model name. Without a configured key, reports still save locally and AI review
-is unavailable.
+model name. Without a configured key, reports still save locally and AI
+features are unavailable.
 
 The report form's AI consent checkbox is unchecked by default. Only after a
 user opts in does the app send the resized image, category, and description to
@@ -176,3 +180,10 @@ with a short explanation of visible evidence. It cannot authenticate the
 report, image date, location, or danger level. An authenticated human
 moderation system and shared database are not implemented; therefore reports
 stay pending and Guardian/Saviour counts do not advance.
+
+The conditions-summary checkbox is also unchecked by default. After consent,
+the app sends the current weather estimate and regional USGS earthquake count
+to the `/api/summarize-conditions` function. It never sends precise coordinates
+or locally stored reports for this summary. The model is instructed to describe
+only the supplied observations; its output can still be wrong and must not be
+used as an official warning or travel/safety advice.
