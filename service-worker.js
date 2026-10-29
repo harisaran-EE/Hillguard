@@ -1,5 +1,5 @@
-const CACHE_NAME = "hillguard-app-shell-v7";
-const APP_SHELL = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/icon.svg"];
+const CACHE_NAME = "hillguard-app-shell-v13";
+const APP_SHELL = ["/", "/index.html", "/styles.css", "/contacts.js", "/app.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

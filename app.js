@@ -2,16 +2,25 @@ const DATABASE_NAME = "hillguard-local";
 const DATABASE_VERSION = 1;
 const REPORTS_STORE = "reports";
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
-const CLUSTER_RADIUS_KM = 2;
-const CLUSTER_WINDOW_MS = 60 * 60 * 1000;
 const GEOFENCE_RADIUS_KM = 5;
-const SAMPLE_WEATHER_LABEL = "Guwahati area · sample location";
+const SAMPLE_WEATHER_LABEL = "Guwahati reference area";
 const WEATHER_CACHE_KEY = "hillguard-weather-sample-v2";
 const WEATHER_CACHE_TTL_MS = 30 * 60 * 1000;
 const WEATHER_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 const WEATHER_REQUEST_TIMEOUT_MS = 12000;
 const RAIN_MAP_GRID_STEP_DEGREES = 0.12;
 const RAIN_MAP_SPOT_RADIUS_METERS = 7000;
+const HAZARD_GRID_DEGREES = 0.1;
+const HAZARD_HISTORY_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+const EARTHQUAKE_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+const EARTHQUAKE_REQUEST_TIMEOUT_MS = 15000;
+const EARTHQUAKE_REGION = {
+  minLatitude: 21,
+  maxLatitude: 31,
+  minLongitude: 88,
+  maxLongitude: 98
+};
+const EARTHQUAKE_CACHE_KEY = "hillguard-usgs-earthquakes-v1";
 const SAMPLE_LOCATION = { latitude: 26.141, longitude: 91.735 };
 const SAMPLE_HAZARDS = [
   { latitude: 26.1698, longitude: 91.735, label: "NH-27 · sample slope report", type: "landslide" },
@@ -71,6 +80,8 @@ const elements = {
   hazardAlert: document.querySelector("#hazard-alert"),
   alertCopy: document.querySelector("#alert-copy"),
   incidentList: document.querySelector("#incident-list"),
+  hazardMapStatus: document.querySelector("#hazard-map-status"),
+  hazardRefresh: document.querySelector("#refresh-hazards"),
   reportCount: document.querySelector("#report-count"),
   filterAllCount: document.querySelector("#filter-all-count"),
   reportDialog: document.querySelector("#report-dialog"),
@@ -81,8 +92,10 @@ const elements = {
   photoPreview: document.querySelector("#photo-preview"),
   capturedLocation: document.querySelector("#captured-location"),
   toast: document.querySelector("#toast"),
-  xpTotal: document.querySelector("#xp-total"),
+  successfulReportTotal: document.querySelector("#successful-report-total"),
   reputationBadge: document.querySelector("#reputation-badge"),
+  reputationTitle: document.querySelector("#reputation-title"),
+  reputationProgress: document.querySelector("#reputation-progress"),
   weatherCondition: document.querySelector("#weather-condition"),
   weatherLocation: document.querySelector("#weather-location"),
   weatherState: document.querySelector("#weather-state"),
@@ -90,7 +103,11 @@ const elements = {
   rainAmount: document.querySelector("#rain-amount"),
   rainAmountLabel: document.querySelector("#rain-amount-label"),
   rainLevel: document.querySelector("#rain-level"),
-  weatherRefresh: document.querySelector("#refresh-weather")
+  weatherRefresh: document.querySelector("#refresh-weather"),
+  contactState: document.querySelector("#contact-state"),
+  contactDistrict: document.querySelector("#contact-district"),
+  contactDirectoryStatus: document.querySelector("#contact-directory-status"),
+  contactList: document.querySelector("#contact-list")
 };
 
 let database;
@@ -106,7 +123,15 @@ let weatherAbortController = null;
 let currentWeather = null;
 let rainfallMap;
 let rainfallMapLayer;
+let hazardActivityLayer;
 let rainfallCenterMarker;
+let rainfallMapTilesUnavailable = false;
+let earthquakeEvents = [];
+let earthquakeFetchedAtMs = 0;
+let earthquakeFetchError = "";
+let earthquakeCacheError = "";
+let earthquakeAbortController = null;
+let earthquakeRequestId = 0;
 
 function applyTheme(theme) {
   const isDark = theme === "dark";
@@ -117,7 +142,7 @@ function applyTheme(theme) {
   toggle.setAttribute("title", label);
   toggle.setAttribute("aria-pressed", String(isDark));
   document.querySelector("#theme-label").textContent = isDark ? "Bright mode" : "Dark mode";
-  document.querySelector('meta[name="theme-color"]').content = isDark ? "#111a29" : "#1e293b";
+  document.querySelector('meta[name="theme-color"]').content = isDark ? "#0d1522" : "#0f172a";
 }
 
 function getSavedTheme() {
@@ -195,53 +220,13 @@ function haversineDistanceKm(first, second) {
   return 6371 * 2 * Math.atan2(Math.sqrt(arc), Math.sqrt(1 - arc));
 }
 
-function calculateConfidence(report, reports) {
-  const matchingReports = reports.filter((other) =>
-    Math.abs(other.createdAt - report.createdAt) <= CLUSTER_WINDOW_MS
-      && haversineDistanceKm(report, other) <= CLUSTER_RADIUS_KM
-  );
-  const count = matchingReports.length;
-
-  if (count >= 4) {
-    return { count, label: "Threshold reached · demo", level: "verified" };
-  }
-  if (count >= 2) {
-    return { count, label: "Medium confidence · demo", level: "medium" };
-  }
-  return { count, label: "Unverified · demo", level: "unverified" };
-}
-
 async function refreshSavedReports() {
   savedReports = await readSavedReports();
-  const reportsById = new Map(savedReports.map((report) => [report.id, report]));
-  let changed = false;
-
-  for (const report of savedReports) {
-    const confidence = calculateConfidence(report, savedReports);
-    if (
-      report.confidenceCount !== confidence.count
-      || report.confidence !== confidence.label
-      || report.confidenceLevel !== confidence.level
-    ) {
-      changed = true;
-    }
-    report.confidenceCount = confidence.count;
-    report.confidence = confidence.label;
-    report.confidenceLevel = confidence.level;
-    if (confidence.level === "verified" && !report.xpAwarded) {
-      report.xpAwarded = true;
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    await Promise.all(savedReports.map(writeReport));
-  }
-
   renderReports();
   renderReputation();
   renderQueueCount();
   updateGeofenceAlert();
+  renderHazardActivity();
 }
 
 function escapeHtml(value) {
@@ -266,11 +251,24 @@ function formatRelativeTime(timestamp) {
 function renderReportCard(report, local) {
   const icon = escapeHtml(typeSymbols[report.type] ?? "•");
   const typeName = escapeHtml(typeNames[report.type] ?? "Hazard report");
-  const confidenceLevel = ["medium", "verified"].includes(report.confidenceLevel)
-    ? report.confidenceLevel
-    : "unverified";
-  const label = local ? report.confidence : report.status;
-  const tag = local ? `${report.confidenceCount} ${report.confidenceCount === 1 ? "REPORT" : "REPORTS"}` : "EXAMPLE";
+  const isHumanApproved = local
+    && report.humanReviewStatus === "approved"
+    && Number.isFinite(report.humanApprovedAt);
+  const confidenceLevel = local
+    ? isHumanApproved ? "verified" : "unverified"
+    : ["medium", "verified"].includes(report.confidenceLevel)
+      ? report.confidenceLevel
+      : "unverified";
+  const label = local
+    ? isHumanApproved
+      ? "Human approved"
+      : "Pending human review"
+    : report.status;
+  const tag = local ? "LOCAL" : "EXAMPLE";
+  const saviourTag = local && getHumanApprovedReportCount() >= 20 && isHumanApproved
+    ? '<span class="saviour-report-tag">SAVIOUR</span>'
+    : "";
+  const aiReview = local ? formatAiReviewSummary(report) : "";
   const photoNote = local && report.photoName
     ? `<span class="photo-attached">PHOTO ATTACHED</span>`
     : "";
@@ -291,10 +289,12 @@ function renderReportCard(report, local) {
         <span class="distance">${locationDescription}</span>
       </div>
       <p class="incident-description">${escapeHtml(report.description)}</p>
+      ${aiReview ? `<p class="ai-review-result">${escapeHtml(aiReview)}</p>` : ""}
       <div class="incident-footer">
         <span class="verification ${confidenceLevel}"><i class="verification-dot" aria-hidden="true"></i>${escapeHtml(label)}</span>
         <span class="confidence-tag ${confidenceLevel}">${escapeHtml(tag)}</span>
       </div>
+      ${saviourTag}
       ${photoNote}
     </article>
   `;
@@ -313,7 +313,7 @@ function renderReports() {
   elements.filterAllCount.textContent = String(allReports.length);
 
   if (visibleReports.length === 0) {
-    elements.incidentList.innerHTML = '<p class="empty-state">No reports in this category yet. You can add a local demo report.</p>';
+    elements.incidentList.innerHTML = '<p class="empty-state">No reports in this category yet. Add a report with a captured location and photo.</p>';
     return;
   }
 
@@ -323,14 +323,172 @@ function renderReports() {
 }
 
 function renderReputation() {
-  const points = savedReports.filter((report) => report.xpAwarded).length * 50;
-  const badge = points >= 601 ? "GUARDIAN" : points >= 201 ? "SENTINEL" : "SCOUT";
-  elements.xpTotal.textContent = String(points);
+  const successes = getHumanApprovedReportCount();
+  const badge = successes >= 20 ? "SAVIOUR" : successes >= 5 ? "GUARDIAN" : "SCOUT";
+  elements.successfulReportTotal.textContent = String(successes);
   elements.reputationBadge.textContent = badge;
+  elements.reputationTitle.textContent = badge === "SAVIOUR"
+    ? "Saviour · local"
+    : badge === "GUARDIAN"
+      ? "Guardian · local"
+      : "Local report contributor";
+  elements.reputationProgress.textContent = badge === "SAVIOUR"
+    ? "Saviour tag shown on human-approved local reports"
+    : badge === "GUARDIAN"
+      ? `${successes} human-approved reports · stored on this device`
+      : `Human moderation is not connected · ${successes}/5 approved`;
+  elements.reputationBadge.dataset.rank = badge.toLowerCase();
+}
+
+function getHumanApprovedReportCount() {
+  return savedReports.filter((report) =>
+    report.locationMode !== "sample"
+    && report.humanReviewStatus === "approved"
+    && Number.isFinite(report.humanApprovedAt)
+  ).length;
+}
+
+function formatAiReviewSummary(report) {
+  if (report.aiReviewStatus === "pending") return "AI photo triage pending · human review required";
+  if (report.aiReviewStatus === "offline") return "Saved offline · AI triage not requested";
+  if (report.aiReviewStatus === "unavailable") return "AI triage unavailable · human review required";
+  if (report.aiReviewStatus === "not-requested") return "AI triage not requested";
+  if (report.aiReviewStatus !== "complete" || !report.aiReview) return "";
+
+  const categories = {
+    likely_match: "AI suggests the photo may match",
+    uncertain: "AI is uncertain about the photo",
+    likely_mismatch: "AI suggests the photo may not match"
+  };
+  const category = categories[report.aiReview.category] ?? categories.uncertain;
+  return `${category} · ${report.aiReview.reason} · not verified; human review required`;
 }
 
 function renderQueueCount() {
   elements.queueCount.textContent = `${savedReports.length} LOCAL`;
+}
+
+function contactPhoneLink(phone, label) {
+  const telephoneUri = phone.replace(/[^\d+]/g, "");
+  return `<a class="contact-number" href="tel:${telephoneUri}">${escapeHtml(label)}</a>`;
+}
+
+function renderContactDirectory() {
+  const state = CONTACT_STATES.find((entry) => entry.name === elements.contactState.value);
+  const district = elements.contactDistrict.value;
+  const selectedArea = state && district ? `${district}, ${state.name}` : "";
+  const fireContacts = state ? FIRE_CONTACTS[state.name] : null;
+  const districtControlRoom = district && fireContacts?.regionalControlRooms?.find((contact) =>
+    contact.districts.includes(district)
+  );
+  const districtStations = fireContacts?.districtStations?.[district] ?? [];
+  const hasLocalStationNumber = districtStations.length > 0;
+
+  if (!state) {
+    elements.contactDirectoryStatus.textContent = "National emergency and regional monitoring contacts are shown. Choose a state and district to check for a published local fire-station number.";
+  } else if (district) {
+    const fireStatus = hasLocalStationNumber
+      ? "Officially listed contacts for the local fire stations are shown below."
+      : districtControlRoom
+        ? "No direct station number was published; a regional fire control room is listed below."
+        : fireContacts?.stateControlRoom
+          ? "No direct station number was published; the state headquarters control room is listed below."
+          : "No direct station or state fire control-room number was verified; call nationwide emergency response at 112.";
+    elements.contactDirectoryStatus.textContent = `${selectedArea}: ${fireStatus} Numbers are labeled by their actual coverage; no hotline is presented as a unique district-station line.`;
+  } else {
+    elements.contactDirectoryStatus.textContent = `${state.name}: select a district to check for a published direct station number. Available regional, state, and national contacts are labeled by their coverage.`;
+  }
+
+  const cards = [];
+
+  for (const station of districtStations) {
+    cards.push(`<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon fire" aria-hidden="true">FES</span><div><h3>${escapeHtml(station.name)}</h3><span>${escapeHtml(district)}, ${escapeHtml(state.name)} · official station contact</span></div></div>
+      <p>Direct contact details published for this fire station by the state fire service.</p>
+      <div class="contact-number-list">${station.numbers.map(([number, label]) => contactPhoneLink(number, label)).join("")}</div>
+      <a class="contact-source-link" href="${escapeHtml(fireContacts.stationContactSource.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(fireContacts.stationContactSource.sourceLabel)}</a>
+    </article>`);
+  }
+
+  if (districtControlRoom) {
+    cards.push(`<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon fire" aria-hidden="true">FES</span><div><h3>${escapeHtml(districtControlRoom.label)}</h3><span>${escapeHtml(districtControlRoom.coverage)}</span></div></div>
+      <p>${escapeHtml(districtControlRoom.description)}</p>
+      <div class="contact-number-list">${districtControlRoom.numbers.map(([number, label]) => contactPhoneLink(number, label)).join("")}</div>
+      <a class="contact-source-link" href="${escapeHtml(districtControlRoom.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(districtControlRoom.sourceLabel)}</a>
+      <a class="contact-source-link" href="${escapeHtml(fireContacts.stationDirectory.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(fireContacts.stationDirectory.sourceLabel)} · station names only</a>
+    </article>`);
+  }
+
+  if (!hasLocalStationNumber && !districtControlRoom && fireContacts?.stateControlRoom) {
+    const controlRoom = fireContacts.stateControlRoom;
+    cards.push(`<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon fire" aria-hidden="true">FES</span><div><h3>${escapeHtml(controlRoom.label)}</h3><span>${escapeHtml(controlRoom.coverage)}</span></div></div>
+      <p>${escapeHtml(controlRoom.description)}</p>
+      <div class="contact-number-list">${controlRoom.numbers.map(([number, label]) => contactPhoneLink(number, label)).join("")}</div>
+      <a class="contact-source-link" href="${escapeHtml(controlRoom.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(controlRoom.sourceLabel)}</a>
+    </article>`);
+  } else if (!hasLocalStationNumber && !districtControlRoom && fireContacts?.stateOffice) {
+    const stateOffice = fireContacts.stateOffice;
+    cards.push(`<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon fire" aria-hidden="true">FES</span><div><h3>${escapeHtml(stateOffice.label)}</h3><span>${escapeHtml(stateOffice.coverage)}</span></div></div>
+      <p>${escapeHtml(stateOffice.description)}</p>
+      <div class="contact-number-list">${stateOffice.numbers.map(([number, label]) => contactPhoneLink(number, label)).join("")}</div>
+      <a class="contact-source-link" href="${escapeHtml(stateOffice.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(stateOffice.sourceLabel)}</a>
+      <a class="contact-source-link" href="${escapeHtml(fireContacts.stationDirectory.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(fireContacts.stationDirectory.sourceLabel)} · station names only</a>
+    </article>`);
+  }
+
+  cards.push(
+    `<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon emergency" aria-hidden="true">112</span><div><h3>Emergency response</h3><span>India · nationwide</span></div></div>
+      <p>Request fire and rescue assistance through India’s emergency response number.</p>
+      <div class="contact-number-list">${contactPhoneLink("112", "Call 112")}</div>
+      <a class="contact-source-link" href="https://112.gov.in/" target="_blank" rel="noopener noreferrer">Emergency Response Support System · Government of India</a>
+    </article>`
+  );
+
+  cards.push(
+    `<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon weather" aria-hidden="true">MET</span><div><h3>Regional Meteorological Centre</h3><span>India Meteorological Department · Guwahati</span></div></div>
+      <p>Weather Section contact published by IMD. District warning and forecast pages are available from the centre’s portal.</p>
+      <div class="contact-number-list">${contactPhoneLink("0361-2968241", "Weather Section · 0361 2968241")}</div>
+      <a class="contact-source-link" href="https://mausam.imd.gov.in/guwahati/contactus.php" target="_blank" rel="noopener noreferrer">IMD contact listing</a>
+      <a class="contact-source-link" href="https://mausam.imd.gov.in/guwahati/" target="_blank" rel="noopener noreferrer">IMD Guwahati forecasts and warnings</a>
+    </article>`
+  );
+
+  cards.push(
+    `<article class="contact-card">
+      <div class="contact-card-heading"><span class="contact-type-icon seismic" aria-hidden="true">NCS</span><div><h3>24×7 Earthquake Monitoring Centre</h3><span>National Centre for Seismology · New Delhi</span></div></div>
+      <p>National seismic monitoring contact; this is not a district office or an emergency dispatch line.</p>
+      <div class="contact-number-list">${contactPhoneLink("+91-11-24344484", "+91 11 2434 4484")}${contactPhoneLink("+91-11-24344547", "+91 11 2434 4547")}</div>
+      <a class="contact-source-link" href="https://seismo.gov.in/contact-us" target="_blank" rel="noopener noreferrer">National Centre for Seismology · official contacts</a>
+    </article>`
+  );
+
+  elements.contactList.innerHTML = cards.join("");
+}
+
+function initializeContactDirectory() {
+  for (const state of CONTACT_STATES) {
+    elements.contactState.add(new Option(state.name, state.name));
+  }
+
+  elements.contactState.addEventListener("change", () => {
+    const state = CONTACT_STATES.find((entry) => entry.name === elements.contactState.value);
+    elements.contactDistrict.replaceChildren(new Option(
+      state ? "Select a district" : "Select a state first",
+      ""
+    ));
+    elements.contactDistrict.disabled = !state;
+    for (const district of state?.districts.split("|") ?? []) {
+      elements.contactDistrict.add(new Option(district, district));
+    }
+    renderContactDirectory();
+  });
+  elements.contactDistrict.addEventListener("change", renderContactDirectory);
+  renderContactDirectory();
 }
 
 function updateConnectivity() {
@@ -345,7 +503,7 @@ function updateConnectivity() {
 
 function updateGeofenceAlert() {
   const location = getLocalLocation();
-  if (!location) {
+  if (!location || currentLocation?.mode !== "sample") {
     elements.hazardAlert.hidden = true;
     return;
   }
@@ -360,7 +518,7 @@ function updateGeofenceAlert() {
     return;
   }
 
-  elements.alertCopy.textContent = `${nearest.hazard.label} is approximately ${nearest.distance.toFixed(1)} km away. Sample data only; not a real-world warning.`;
+  elements.alertCopy.textContent = `${nearest.hazard.label} is approximately ${nearest.distance.toFixed(1)} km from the Guwahati reference point. This is an example record, not a current incident alert.`;
   elements.hazardAlert.hidden = false;
 }
 
@@ -393,16 +551,39 @@ function initializeRainMap() {
     zoom: 9,
     scrollWheelZoom: false
   });
-  window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  const tileLayer = window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
   }).addTo(rainfallMap);
+  tileLayer.on("tileerror", () => {
+    rainfallMapTilesUnavailable = true;
+    if (currentWeather) {
+      renderRainfallMap(
+        currentWeather.reading,
+        !navigator.onLine || Date.now() - currentWeather.reading.fetchedAtMs > WEATHER_CACHE_TTL_MS
+      );
+    } else {
+      setRainMapStatus("OpenStreetMap tiles unavailable · rainfall estimates may still load.");
+    }
+  });
+  tileLayer.on("load", () => {
+    if (!rainfallMapTilesUnavailable) return;
+    rainfallMapTilesUnavailable = false;
+    if (currentWeather) {
+      renderRainfallMap(
+        currentWeather.reading,
+        !navigator.onLine || Date.now() - currentWeather.reading.fetchedAtMs > WEATHER_CACHE_TTL_MS
+      );
+    }
+  });
   rainfallMapLayer = window.L.layerGroup().addTo(rainfallMap);
+  hazardActivityLayer = window.L.layerGroup().addTo(rainfallMap);
   rainfallCenterMarker = window.L.circleMarker(
     [SAMPLE_LOCATION.latitude, SAMPLE_LOCATION.longitude],
     { radius: 6, color: "#fff", weight: 2, fillColor: "#2563eb", fillOpacity: 1 }
   ).addTo(rainfallMap);
   rainfallCenterMarker.bindPopup("Sample weather-map center · Guwahati area");
+  rainfallMap.on("moveend", renderHazardActivity);
   rainfallMap.whenReady(() => window.setTimeout(() => rainfallMap.invalidateSize(), 0));
 }
 
@@ -411,6 +592,316 @@ function centerRainfallMap(location, label, zoom = 9) {
   rainfallMap.setView([location.latitude, location.longitude], zoom);
   rainfallCenterMarker.setLatLng([location.latitude, location.longitude]);
   rainfallCenterMarker.bindPopup(`${label} · rainfall map center`);
+  renderHazardActivity();
+}
+
+function getHazardCellKey(location) {
+  const latitudeCell = Math.floor(location.latitude / HAZARD_GRID_DEGREES);
+  const longitudeCell = Math.floor(location.longitude / HAZARD_GRID_DEGREES);
+  return `${latitudeCell}:${longitudeCell}`;
+}
+
+function getHazardTier(count) {
+  if (count >= 6) return "red";
+  if (count >= 3) return "orange";
+  return "yellow";
+}
+
+function groupByHazardCell(events) {
+  const cells = new Map();
+  for (const event of events) {
+    const key = getHazardCellKey(event);
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(event);
+  }
+
+  return Array.from(cells.values(), (cellEvents) => ({
+    count: cellEvents.length,
+    latitude: cellEvents.reduce((sum, event) => sum + event.latitude, 0) / cellEvents.length,
+    longitude: cellEvents.reduce((sum, event) => sum + event.longitude, 0) / cellEvents.length,
+    latest: cellEvents.reduce((latest, event) => event.time > latest.time ? event : latest)
+  }));
+}
+
+function isWithinEarthquakeRegion(location) {
+  return location.latitude >= EARTHQUAKE_REGION.minLatitude
+    && location.latitude <= EARTHQUAKE_REGION.maxLatitude
+    && location.longitude >= EARTHQUAKE_REGION.minLongitude
+    && location.longitude <= EARTHQUAKE_REGION.maxLongitude;
+}
+
+function hasValidCoordinates(location) {
+  return Number.isFinite(location.latitude)
+    && location.latitude >= -90
+    && location.latitude <= 90
+    && Number.isFinite(location.longitude)
+    && location.longitude >= -180
+    && location.longitude <= 180;
+}
+
+function getRecentLandslideReports(now = Date.now()) {
+  const cutoff = now - HAZARD_HISTORY_WINDOW_MS;
+  return savedReports.filter((report) =>
+    report.type === "landslide"
+    && report.locationMode === "gps"
+    && report.humanReviewStatus !== "rejected"
+    && hasValidCoordinates(report)
+    && Number.isFinite(report.createdAt)
+    && report.createdAt >= cutoff
+    && report.createdAt <= now
+  );
+}
+
+function normalizeEarthquakeFeature(feature, startTime, endTime) {
+  const coordinates = feature.geometry?.coordinates;
+  const time = feature.properties?.time;
+  if (
+    feature.geometry?.type !== "Point"
+    || !Array.isArray(coordinates)
+    || !Number.isFinite(time)
+    || time < startTime
+    || time > endTime
+  ) {
+    return null;
+  }
+
+  const longitude = coordinates[0];
+  const latitude = coordinates[1];
+  if (!hasValidCoordinates({ latitude, longitude })) return null;
+  const event = {
+    id: String(feature.id ?? ""),
+    latitude,
+    longitude,
+    time,
+    magnitude: Number.isFinite(feature.properties?.mag) ? feature.properties.mag : null,
+    place: typeof feature.properties?.place === "string" ? feature.properties.place : "Location not listed"
+  };
+  return isWithinEarthquakeRegion(event) ? event : null;
+}
+
+function readEarthquakeCache() {
+  try {
+    const stored = localStorage.getItem(EARTHQUAKE_CACHE_KEY);
+    if (!stored) return null;
+    const cache = JSON.parse(stored);
+    if (
+      cache.version !== 1
+      || !Number.isFinite(cache.fetchedAtMs)
+      || !Array.isArray(cache.events)
+      || cache.events.some((event) =>
+        typeof event.id !== "string"
+        || !Number.isFinite(event.latitude)
+        || !Number.isFinite(event.longitude)
+        || !Number.isFinite(event.time)
+        || (event.magnitude !== null && !Number.isFinite(event.magnitude))
+        || typeof event.place !== "string"
+        || !hasValidCoordinates(event)
+        || !isWithinEarthquakeRegion(event)
+      )
+    ) {
+      throw new Error("The saved earthquake catalog has an invalid format.");
+    }
+    return cache;
+  } catch (error) {
+    console.error("Could not read the cached USGS earthquake catalog.", error);
+    earthquakeFetchError = `Saved earthquake data could not be read: ${error.message}`;
+    return null;
+  }
+}
+
+async function fetchEarthquakeHistory(signal) {
+  const endTime = Date.now();
+  const startTime = endTime - HAZARD_HISTORY_WINDOW_MS;
+  const url = new URL("https://earthquake.usgs.gov/fdsnws/event/1/query");
+  url.search = new URLSearchParams({
+    format: "geojson",
+    starttime: new Date(startTime).toISOString(),
+    endtime: new Date(endTime).toISOString(),
+    minlatitude: String(EARTHQUAKE_REGION.minLatitude),
+    maxlatitude: String(EARTHQUAKE_REGION.maxLatitude),
+    minlongitude: String(EARTHQUAKE_REGION.minLongitude),
+    maxlongitude: String(EARTHQUAKE_REGION.maxLongitude),
+    limit: "20000",
+    orderby: "time"
+  }).toString();
+
+  const response = await fetch(url, { signal, cache: "no-store" });
+  if (!response.ok) throw new Error(`USGS returned HTTP ${response.status}.`);
+
+  const payload = await response.json();
+  if (payload.type !== "FeatureCollection" || !Array.isArray(payload.features)) {
+    throw new Error("USGS returned an invalid earthquake catalog.");
+  }
+
+  return payload.features
+    .map((feature) => normalizeEarthquakeFeature(feature, startTime, endTime))
+    .filter((event) => event !== null);
+}
+
+function formatHazardStatus() {
+  const now = Date.now();
+  const cutoff = now - HAZARD_HISTORY_WINDOW_MS;
+  const recentEarthquakes = earthquakeEvents.filter((event) => event.time >= cutoff && event.time <= now);
+  const localLandslides = getRecentLandslideReports(now);
+  const earthquakeUpdate = earthquakeFetchedAtMs
+    ? new Date(earthquakeFetchedAtMs).toLocaleString()
+    : "";
+  const savedDataNote = earthquakeFetchError && earthquakeFetchedAtMs
+    ? " · saved catalog; refresh failed"
+    : "";
+  const earthquakeStatus = recentEarthquakes.length
+    ? `USGS catalog: ${recentEarthquakes.length} earthquake events in Northeast India and nearby border regions in 365 days${earthquakeUpdate ? ` · updated ${earthquakeUpdate}` : ""}${savedDataNote}.`
+    : earthquakeFetchError
+      ? `USGS earthquake data unavailable${earthquakeFetchedAtMs ? ` · showing saved data from ${earthquakeUpdate}` : ""}.`
+      : earthquakeFetchedAtMs
+        ? `USGS catalog: no earthquake events in the last 365 days${earthquakeUpdate ? ` · updated ${earthquakeUpdate}` : ""}.`
+        : "Loading USGS earthquake catalog for Northeast India and nearby border regions…";
+  const cacheNote = earthquakeCacheError ? ` ${earthquakeCacheError}` : "";
+  elements.hazardMapStatus.textContent = `${earthquakeStatus} Landslide reports on this device: ${localLandslides.length} · unverified, not shared.${cacheNote}`;
+}
+
+function hasNearbyRain(location) {
+  const reading = currentWeather?.reading;
+  if (
+    !reading
+    || elements.weatherState.dataset.state !== "ready"
+    || Date.now() - reading.fetchedAtMs > WEATHER_CACHE_TTL_MS
+  ) {
+    return false;
+  }
+
+  return reading.rainMapReadings.some((point) =>
+    point.rainfallMm > 0.01 && haversineDistanceKm(location, point) <= 8
+  );
+}
+
+function createHazardPopup(type, group, rainNearby = false) {
+  const tier = getHazardTier(group.count);
+  const date = new Date(group.latest.time).toLocaleDateString();
+  const rainMessage = rainNearby
+    ? "<p>Open-Meteo indicates rain at a nearby sample point; this is an estimate and does not change the incident-count tier.</p>"
+    : "";
+  if (type === "earthquake") {
+    const magnitude = Number.isFinite(group.latest.magnitude)
+      ? ` · magnitude ${group.latest.magnitude.toFixed(1)}`
+      : "";
+    return `<strong>${group.count} USGS earthquake event${group.count === 1 ? "" : "s"} · ${tier.toUpperCase()}</strong><p>Approx. 10 × 11 km map cell · past 365 days. Latest: ${escapeHtml(group.latest.place)} · ${date}${magnitude}.</p><p>Activity counts are not a forecast or an official warning.</p><a href="https://earthquake.usgs.gov/" target="_blank" rel="noopener noreferrer">USGS earthquake catalog</a>`;
+  }
+
+  return `<strong>${group.count} local landslide report${group.count === 1 ? "" : "s"} · ${tier.toUpperCase()}</strong><p>Approx. 10 × 11 km map cell · past 365 days. Latest report: ${date}.</p><p>Reports are unverified, stored only on this device, and are not an official warning.</p>${rainMessage}<a href="https://www.nrsc.gov.in/nrscnew/resources_atlas_landslide.php" target="_blank" rel="noopener noreferrer">NRSC/ISRO Landslide Atlas · historical context</a>`;
+}
+
+function addHazardMarker(type, group, rainNearby = false) {
+  const tier = getHazardTier(group.count);
+  const rainClass = rainNearby ? " rain-nearby" : "";
+  const symbol = type === "earthquake"
+    ? '<svg class="earthquake-crack" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.8 2.5 8.7 11h4.1l-2.6 10.5 7-12h-4.1l2.2-7Z"/></svg>'
+    : '<span class="falling-rocks" aria-hidden="true"><i></i><i></i><i></i></span>';
+  const rainDrop = rainNearby
+    ? '<svg class="rain-nearby-drop" viewBox="0 0 16 20" aria-label="Rain estimated nearby"><path d="M8 1C6 5 2.5 8.5 2.5 12a5.5 5.5 0 0 0 11 0C13.5 8.5 10 5 8 1Z"/></svg>'
+    : "";
+  const icon = window.L.divIcon({
+    className: "hazard-map-icon",
+    html: `<span class="hazard-map-marker ${type} ${tier}${rainClass}" aria-hidden="true"><span class="hazard-map-symbol">${symbol}</span><span class="hazard-map-count">${group.count}</span>${rainDrop}</span>`,
+    iconSize: [42, 42],
+    iconAnchor: [21, 21]
+  });
+  const latest = type === "earthquake" ? group.latest.place : "Unverified local report";
+  const marker = window.L.marker([group.latitude, group.longitude], {
+    icon,
+    title: `${type === "earthquake" ? "Earthquake activity" : "Landslide reports"}: ${group.count} in the past 365 days · ${latest}${rainNearby ? " · rain estimated nearby" : ""}`
+  });
+  marker.bindPopup(createHazardPopup(type, group, rainNearby), { autoPan: false });
+  marker.addTo(hazardActivityLayer);
+}
+
+function renderHazardActivity() {
+  if (hazardActivityLayer) {
+    if (rainfallMap) rainfallMap.closePopup();
+    hazardActivityLayer.clearLayers();
+  }
+  const now = Date.now();
+  const cutoff = now - HAZARD_HISTORY_WINDOW_MS;
+  const recentEarthquakes = earthquakeEvents.filter((event) => event.time >= cutoff && event.time <= now);
+  const localLandslides = getRecentLandslideReports(now);
+
+  if (hazardActivityLayer && rainfallMap) {
+    const visibleBounds = rainfallMap.getBounds().pad(0.15);
+    for (const group of groupByHazardCell(recentEarthquakes)) {
+      if (visibleBounds.contains([group.latitude, group.longitude])) {
+        addHazardMarker("earthquake", group);
+      }
+    }
+    for (const group of groupByHazardCell(localLandslides)) {
+      if (visibleBounds.contains([group.latitude, group.longitude])) {
+        addHazardMarker("landslide", group, hasNearbyRain(group));
+      }
+    }
+  }
+
+  formatHazardStatus();
+}
+
+async function refreshEarthquakeHistory(force = false) {
+  const now = Date.now();
+  if (
+    !force
+    && earthquakeFetchedAtMs
+    && now - earthquakeFetchedAtMs < EARTHQUAKE_REFRESH_INTERVAL_MS
+  ) {
+    renderHazardActivity();
+    return;
+  }
+  if (!navigator.onLine) {
+    earthquakeFetchError = "Offline";
+    renderHazardActivity();
+    return;
+  }
+
+  if (earthquakeAbortController) earthquakeAbortController.abort();
+  const requestId = ++earthquakeRequestId;
+  const controller = new AbortController();
+  earthquakeAbortController = controller;
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    EARTHQUAKE_REQUEST_TIMEOUT_MS
+  );
+  if (elements.hazardRefresh) elements.hazardRefresh.disabled = true;
+  earthquakeFetchError = "";
+  renderHazardActivity();
+
+  try {
+    const events = await fetchEarthquakeHistory(controller.signal);
+    if (requestId !== earthquakeRequestId) return;
+    earthquakeEvents = events;
+    earthquakeFetchedAtMs = Date.now();
+    earthquakeFetchError = "";
+    try {
+      localStorage.setItem(EARTHQUAKE_CACHE_KEY, JSON.stringify({
+        version: 1,
+        fetchedAtMs: earthquakeFetchedAtMs,
+        events
+      }));
+      earthquakeCacheError = "";
+    } catch (error) {
+      earthquakeCacheError = "Earthquake data could not be saved for offline use.";
+      console.error("Could not cache the USGS earthquake catalog.", error);
+    }
+    renderHazardActivity();
+  } catch (error) {
+    if (requestId !== earthquakeRequestId) return;
+    earthquakeFetchError = error.name === "AbortError"
+      ? "The USGS request timed out."
+      : error.message;
+    console.error("Could not retrieve the USGS earthquake catalog.", error);
+    renderHazardActivity();
+  } finally {
+    window.clearTimeout(timeout);
+    if (requestId === earthquakeRequestId) {
+      earthquakeAbortController = null;
+      if (elements.hazardRefresh) elements.hazardRefresh.disabled = false;
+    }
+  }
 }
 
 function isValidWeatherReading(reading) {
@@ -491,10 +982,24 @@ function renderRainfallMap(reading, stale) {
   rainfallMapLayer.clearLayers();
   let visibleSpots = 0;
   let stormSpots = 0;
+  let drySamples = 0;
 
   for (const point of reading.rainMapReadings) {
     const category = getRainfallCategory(point);
-    if (category.level.id === "dry" && !category.isThunderstorm) continue;
+    if (category.level.id === "dry" && !category.isThunderstorm) {
+      window.L.circleMarker([point.latitude, point.longitude], {
+        radius: 4,
+        color: stale ? "#64748b" : "#334155",
+        weight: 1.5,
+        opacity: stale ? 0.45 : 0.75,
+        fillColor: "#fff",
+        fillOpacity: 0.85
+      })
+        .bindPopup("No rain indicated at this sample point · approximate model estimate")
+        .addTo(rainfallMapLayer);
+      drySamples += 1;
+      continue;
+    }
 
     const color = RAINFALL_COLORS[category.level.id] ?? RAINFALL_COLORS.drizzle;
     window.L.circle([point.latitude, point.longitude], {
@@ -531,8 +1036,8 @@ function renderRainfallMap(reading, stale) {
 
   if (visibleSpots === 0) {
     setRainMapStatus(stale
-      ? "No rain indicated in the saved sample points · this does not guarantee clear conditions."
-      : "No rain indicated at sampled points · this does not guarantee clear conditions.");
+      ? `No rain indicated in ${drySamples} saved sample points · this does not guarantee clear conditions.`
+      : `No rain indicated at ${drySamples} sample points · this does not guarantee clear conditions.`);
   } else {
     const stormText = stormSpots > 0
       ? ` · ${stormSpots} thunderstorm signal${stormSpots === 1 ? "" : "s"}`
@@ -540,6 +1045,9 @@ function renderRainfallMap(reading, stale) {
     setRainMapStatus(
       `${stale ? "Saved, possibly stale estimate" : "Approximate model estimate"} · ${visibleSpots} rainfall spot${visibleSpots === 1 ? "" : "s"}${stormText}`
     );
+  }
+  if (rainfallMapTilesUnavailable) {
+    setRainMapStatus(`${elements.rainMapStatus.textContent} · OpenStreetMap tiles unavailable`);
   }
 }
 
@@ -592,6 +1100,7 @@ function renderWeather(reading, { cached = false, stale = false, status = "" } =
         : "Open-Meteo forecast-model estimate"
   );
   renderRainfallMap(reading, isStale);
+  renderHazardActivity();
 }
 
 function setWeatherUnavailable(message, isError = false) {
@@ -604,6 +1113,7 @@ function setWeatherUnavailable(message, isError = false) {
   elements.weatherState.textContent = message;
   elements.weatherUpdated.textContent = "No current reading";
   if (rainfallMapLayer) rainfallMapLayer.clearLayers();
+  renderHazardActivity();
   setRainMapStatus(rainfallMap ? message : `Map unavailable · ${message}`);
 }
 
@@ -683,6 +1193,7 @@ async function refreshWeather(location, label, mode, force = false) {
 
   elements.weatherLocation.textContent = label;
   if (matchingCache) {
+    currentWeather = { reading: matchingCache, locationMode: mode };
     renderWeather(matchingCache, { cached: true });
     if (!force && Date.now() - matchingCache.fetchedAtMs < WEATHER_CACHE_TTL_MS) return;
   } else {
@@ -758,8 +1269,8 @@ function openRoutePreview() {
     haversineDistanceKm(location, hazard) <= GEOFENCE_RADIUS_KM
   );
   document.querySelector("#route-copy").textContent = nearbyHazard
-    ? "A sample hazard falls within the 5 km demo radius. The route option below is illustrative, not navigable."
-    : "No sample marker is within the 5 km demo radius. Directions and live road checks are not connected.";
+    ? "An example hazard marker is within 5 km of the selected reference point. The route option below is illustrative, not navigable."
+    : "No example marker is within 5 km of the selected point. Directions and live road checks are not connected.";
   elements.routeDialog.showModal();
 }
 
@@ -775,7 +1286,7 @@ function showToast(message) {
 function setCurrentLocation(location, label, mode) {
   currentLocation = { ...location, mode };
   elements.locationSummary.textContent = label;
-  centerRainfallMap(location, mode === "sample" ? "Sample location" : "Your location");
+  centerRainfallMap(location, mode === "sample" ? "Guwahati reference point" : "Your location");
   updateGeofenceAlert();
   void refreshWeather(location, label, mode);
 }
@@ -799,9 +1310,9 @@ function captureGps() {
     },
     (error) => {
       const messages = {
-        1: "Location permission was denied. Allow it in your browser settings or use a sample location for testing.",
-        2: "Your location could not be determined. Try again or use a sample location for testing.",
-        3: "GPS took too long to respond. Try again or use a sample location for testing."
+        1: "Location permission was denied. Allow it in your browser settings or use the Guwahati reference point.",
+        2: "Your location could not be determined. Try again or use the Guwahati reference point.",
+        3: "GPS took too long to respond. Try again or use the Guwahati reference point."
       };
       capturedReportLocation = null;
       elements.capturedLocation.textContent = messages[error.code] ?? `Could not capture GPS: ${error.message}`;
@@ -810,12 +1321,82 @@ function captureGps() {
   );
 }
 
-function formatConfidenceSummary(reports) {
-  const verified = reports.filter((report) => report.confidenceLevel === "verified").length;
-  if (verified > 0) {
-    return `${verified} report${verified === 1 ? "" : "s"} reached the local demo confidence threshold. This is not official verification.`;
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Could not encode the resized report photo."));
+        return;
+      }
+      resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the resized report photo."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function preparePhotoForAi(photo) {
+  if (typeof createImageBitmap !== "function") {
+    throw new Error("This browser cannot safely resize the photo for AI review.");
   }
-  return "Report saved locally. Nothing was sent or synced.";
+
+  const bitmap = await createImageBitmap(photo);
+  try {
+    let scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height));
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("Could not prepare the report photo for AI review.");
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      for (const quality of [0.82, 0.68, 0.54]) {
+        const compressed = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+        if (compressed && compressed.size <= 2 * 1024 * 1024) {
+          return {
+            mimeType: "image/jpeg",
+            data: await blobToBase64(compressed)
+          };
+        }
+      }
+      scale *= 0.72;
+    }
+  } finally {
+    bitmap.close();
+  }
+
+  throw new Error("The photo is too large to prepare for AI review.");
+}
+
+async function requestAiTriage(report) {
+  const image = await preparePhotoForAi(report.photo);
+  const response = await fetch("/api/review-report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      consent: true,
+      type: report.type,
+      description: report.description,
+      image
+    })
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.error || `AI review returned HTTP ${response.status}.`);
+  }
+  if (
+    !result
+    || !["likely_match", "uncertain", "likely_mismatch"].includes(result.category)
+    || !["low", "medium", "high"].includes(result.confidence)
+    || typeof result.reason !== "string"
+    || result.reason.length > 240
+    || result.humanReviewRequired !== true
+  ) {
+    throw new Error("AI review returned an invalid triage result.");
+  }
+  return result;
 }
 
 async function handleReportSubmit(event) {
@@ -841,14 +1422,15 @@ async function handleReportSubmit(event) {
     return;
   }
   if (photo.size > MAX_PHOTO_BYTES) {
-    showToast("This prototype accepts photos up to 8 MB. Choose a smaller image.");
+    showToast("HillSafe accepts photos up to 8 MB. Choose a smaller image.");
     return;
   }
   if (!capturedReportLocation) {
-    showToast("Capture GPS or choose the explicitly labeled sample location before saving.");
+    showToast("Capture GPS or choose the clearly labeled Guwahati reference point before saving.");
     return;
   }
 
+  const requestAiReview = elements.reportForm.elements.aiConsent.checked;
   const report = {
     id: crypto.randomUUID(),
     type,
@@ -860,8 +1442,17 @@ async function handleReportSubmit(event) {
     createdAt: Date.now(),
     photo,
     photoName: photo.name,
-    xpAwarded: false
+    aiReviewStatus: requestAiReview
+      ? navigator.onLine
+        ? "pending"
+        : "offline"
+      : "not-requested",
+    aiReview: null,
+    humanReviewStatus: "pending",
+    humanApprovedAt: null
   };
+  const submitButton = elements.reportForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
 
   try {
     await writeReport(report);
@@ -871,10 +1462,40 @@ async function handleReportSubmit(event) {
     elements.capturedLocation.textContent = "Location not captured";
     clearPhotoPreview();
     elements.reportDialog.close();
-    showToast(formatConfidenceSummary(savedReports));
+    showToast(requestAiReview && navigator.onLine
+      ? "Report saved locally. Requesting optional AI photo triage; human review is still required."
+      : requestAiReview
+        ? "Report saved locally. AI triage is unavailable offline; human review is still required."
+        : "Report saved locally without AI review. It is pending human review.");
+
+    if (!requestAiReview || !navigator.onLine) return;
+
+    try {
+      report.aiReview = await requestAiTriage(report);
+      report.aiReviewStatus = "complete";
+      report.aiReviewAt = Date.now();
+      await writeReport(report);
+      await refreshSavedReports();
+      showToast("AI triage suggestion received. This report is still pending human review.");
+    } catch (error) {
+      console.error("AI photo triage failed; the report remains saved for human review.", error);
+      report.aiReviewStatus = "unavailable";
+      report.aiReviewError = error.message;
+      try {
+        await writeReport(report);
+        await refreshSavedReports();
+      } catch (saveError) {
+        console.error("Could not save the AI review failure status.", saveError);
+        showToast(`Report was saved, but its AI status could not be updated: ${saveError.message}`);
+        return;
+      }
+      showToast(`Report saved; AI triage failed. It remains pending human review. ${error.message}`);
+    }
   } catch (error) {
     console.error("Could not save the local hazard report.", error);
     showToast(`Report was not saved: ${error.message}`);
+  } finally {
+    submitButton.disabled = false;
   }
 }
 
@@ -895,20 +1516,27 @@ function clearPhotoPreview() {
 }
 
 document.querySelector("#banner-dismiss").addEventListener("click", () => {
-  document.querySelector(".prototype-banner").hidden = true;
+  document.querySelector(".source-banner").hidden = true;
 });
 
 document.querySelector("#alert-dismiss").addEventListener("click", () => {
   elements.hazardAlert.hidden = true;
 });
 
-document.querySelector("#open-report-dock").addEventListener("click", () => {
+function openReportDialog() {
   capturedReportLocation = null;
   elements.capturedLocation.textContent = "Location not captured";
   elements.reportDialog.showModal();
+}
+
+document.querySelectorAll("#open-report-dock, #open-report-header, #open-report-mobile").forEach((button) => {
+  button.addEventListener("click", openReportDialog);
 });
 document.querySelector("#open-guide").addEventListener("click", () => elements.guideDialog.showModal());
+document.querySelector("#open-guide-rail").addEventListener("click", () => elements.guideDialog.showModal());
+document.querySelector("#open-guide-mobile").addEventListener("click", () => elements.guideDialog.showModal());
 document.querySelector("#open-route").addEventListener("click", openRoutePreview);
+document.querySelector("#open-route-mobile").addEventListener("click", openRoutePreview);
 
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   button.addEventListener("click", () => button.closest("dialog").close());
@@ -922,9 +1550,9 @@ document.querySelectorAll("dialog").forEach((dialog) => {
 
 document.querySelector("#capture-location").addEventListener("click", captureGps);
 
-document.querySelector("#use-demo-report-location").addEventListener("click", () => {
+document.querySelector("#use-reference-report-location").addEventListener("click", () => {
   capturedReportLocation = { ...SAMPLE_LOCATION, mode: "sample" };
-  elements.capturedLocation.textContent = `${SAMPLE_LOCATION.latitude.toFixed(5)}, ${SAMPLE_LOCATION.longitude.toFixed(5)} · sample coordinates`;
+  elements.capturedLocation.textContent = `${SAMPLE_LOCATION.latitude.toFixed(5)}, ${SAMPLE_LOCATION.longitude.toFixed(5)} · Guwahati reference coordinates, not GPS`;
 });
 
 document.querySelector("#locate-me").addEventListener("click", () => {
@@ -943,17 +1571,21 @@ document.querySelector("#locate-me").addEventListener("click", () => {
     },
     (error) => {
       const message = error.code === 1
-        ? "Location permission was denied. You can use the sample position to preview the demo geofence."
-        : "Could not determine location. Check GPS and try again, or use the sample position.";
+        ? "Location permission was denied. You can view the Guwahati reference point instead."
+        : "Could not determine location. Check GPS and try again, or view the Guwahati reference point.";
       showToast(message);
     },
     { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
   );
 });
 
-document.querySelector("#demo-location").addEventListener("click", () => {
-  setCurrentLocation(SAMPLE_LOCATION, "Sample location · demo only", "sample");
-  showToast("Sample position enabled. Any proximity banner is illustrative, not a real alert.");
+document.querySelector("#reference-location").addEventListener("click", () => {
+  setCurrentLocation(SAMPLE_LOCATION, "Guwahati reference point", "sample");
+  showToast("Guwahati reference point selected. It is not your GPS location.");
+});
+
+elements.hazardRefresh.addEventListener("click", () => {
+  void refreshEarthquakeHistory(true);
 });
 
 document.querySelector(".report-filters").addEventListener("click", (event) => {
@@ -973,16 +1605,23 @@ elements.reportForm.addEventListener("submit", handleReportSubmit);
 window.addEventListener("online", () => {
   updateConnectivity();
   showToast("Connection restored. Local reports are still on this device; server sync is not configured.");
+  void refreshEarthquakeHistory(true);
   const location = getLocalLocation() ?? { ...SAMPLE_LOCATION, mode: "sample" };
   const label = currentLocation?.mode === "gps"
     ? "GPS location active"
     : currentLocation
-      ? "Sample location · demo only"
+      ? "Guwahati reference point"
       : SAMPLE_WEATHER_LABEL;
   void refreshWeather(location, label, currentLocation?.mode ?? "sample");
 });
 window.addEventListener("offline", () => {
   updateConnectivity();
+  if (earthquakeAbortController) earthquakeAbortController.abort();
+  earthquakeRequestId += 1;
+  earthquakeAbortController = null;
+  earthquakeFetchError = "Offline";
+  if (elements.hazardRefresh) elements.hazardRefresh.disabled = false;
+  renderHazardActivity();
   const reading = currentWeather?.reading ?? readSampleWeatherCache();
   if (reading) {
     renderWeather(reading, { cached: true, stale: true, status: "Offline · showing last retrieved model estimate" });
@@ -1005,6 +1644,10 @@ window.setInterval(() => {
   }
 }, 60000);
 
+window.setInterval(() => {
+  void refreshEarthquakeHistory();
+}, EARTHQUAKE_REFRESH_INTERVAL_MS);
+
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   installPrompt = event;
@@ -1015,22 +1658,30 @@ document.querySelector("#install-app").addEventListener("click", async () => {
   if (!installPrompt) return;
   await installPrompt.prompt();
   const choice = await installPrompt.userChoice;
-  if (choice.outcome === "accepted") showToast("Hillguard was added to your device.");
+  if (choice.outcome === "accepted") showToast("HillSafe was added to your device.");
   installPrompt = null;
   document.querySelector("#install-app").hidden = true;
 });
 
 window.addEventListener("appinstalled", () => {
   document.querySelector("#install-app").hidden = true;
-  showToast("Hillguard is ready on your device.");
+  showToast("HillSafe is ready on your device.");
 });
 
 updateConnectivity();
 renderReports();
 renderReputation();
 renderQueueCount();
+initializeContactDirectory();
 
 initializeRainMap();
+const cachedEarthquakeCatalog = readEarthquakeCache();
+if (cachedEarthquakeCatalog) {
+  earthquakeEvents = cachedEarthquakeCatalog.events;
+  earthquakeFetchedAtMs = cachedEarthquakeCatalog.fetchedAtMs;
+}
+renderHazardActivity();
+void refreshEarthquakeHistory();
 const savedWeather = readSampleWeatherCache();
 if (savedWeather) {
   renderWeather(savedWeather, { cached: true });
@@ -1042,7 +1693,7 @@ elements.weatherRefresh.addEventListener("click", () => {
   const label = currentLocation?.mode === "gps"
     ? "GPS location active"
     : currentLocation
-      ? "Sample location · demo only"
+      ? "Guwahati reference point"
       : SAMPLE_WEATHER_LABEL;
   void refreshWeather(location, label, currentLocation?.mode ?? "sample", true);
 });
