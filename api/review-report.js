@@ -1,3 +1,5 @@
+const { requireUser, sendJson, supabaseRequest } = require("../lib/supabase");
+
 const ALLOWED_TYPES = new Set(["landslide", "roadblock"]);
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BASE64_LENGTH = 2_800_000;
@@ -5,12 +7,6 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 6;
 const GEMINI_REQUEST_TIMEOUT_MS = 8_000;
 const rateLimitBuckets = new Map();
-
-function sendJson(response, status, payload) {
-  response.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
-  response.setHeader("Cache-Control", "no-store");
-  response.end(JSON.stringify(payload));
-}
 
 function isValidImageData(data) {
   return typeof data === "string"
@@ -100,6 +96,17 @@ module.exports = async function reviewReport(request, response) {
     return sendJson(response, 429, { error: "Too many review requests. Please wait a minute." });
   }
 
+  let user;
+  try {
+    user = await requireUser(request, response);
+  } catch (error) {
+    console.error("Could not verify the AI triage account.", error);
+    return sendJson(response, error.status ?? 502, {
+      error: error.status === 503 ? error.message : "Could not verify your account."
+    });
+  }
+  if (!user) return;
+
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return sendJson(response, 503, {
@@ -107,12 +114,39 @@ module.exports = async function reviewReport(request, response) {
     });
   }
 
-  const { type, description, image, consent } = request.body ?? {};
+  const { type, description, image, consent, reportId } = request.body ?? {};
   if (consent !== true) {
     return sendJson(response, 400, { error: "Explicit consent is required before sending a photo for AI triage." });
   }
   if (!ALLOWED_TYPES.has(type)) {
     return sendJson(response, 400, { error: "Choose landslide or road block." });
+  }
+  if (
+    typeof reportId !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reportId)
+  ) {
+    return sendJson(response, 400, { error: "A valid saved report is required for AI triage." });
+  }
+  const reportQuery = new URLSearchParams({
+    select: "id",
+    id: `eq.${reportId}`,
+    author_id: `eq.${user.id}`,
+    limit: "1"
+  });
+  try {
+    const { response: reportResponse, data } = await supabaseRequest(`/rest/v1/reports?${reportQuery}`, {
+      serviceRole: true
+    });
+    if (!reportResponse.ok) {
+      console.error("Could not verify the AI triage report owner.", data);
+      return sendJson(response, 502, { error: "Could not verify report ownership." });
+    }
+    if (!data.length) return sendJson(response, 404, { error: "Report not found." });
+  } catch (error) {
+    console.error("Could not verify the AI triage report owner.", error);
+    return sendJson(response, error.status ?? 502, {
+      error: error.status === 503 ? error.message : "Could not verify report ownership."
+    });
   }
   if (
     typeof description !== "string"

@@ -8,14 +8,17 @@ into one interface.
 
 ## Run locally
 
-Serve the repository over localhost or HTTPS. For example:
+For a static-only preview, serve the repository over localhost or HTTPS:
 
 ```sh
 python -m http.server 8000
 ```
 
-Then open `http://localhost:8000`. GPS and service-worker features require
-localhost or HTTPS. On mobile, deploy to HTTPS to install the PWA.
+Then open `http://localhost:8000`. This static preview does not run `/api/*`,
+so account, report, profile, and moderator actions require the Vercel
+development server and Supabase setup described below. GPS and service-worker
+features require localhost or HTTPS. On mobile, deploy to HTTPS to install
+the PWA.
 
 ## Features
 
@@ -26,7 +29,7 @@ localhost or HTTPS. On mobile, deploy to HTTPS to install the PWA.
   area. Drizzle is green, moderate rain yellow, rain orange, and heavy rain
   red. A hazard icon marks model-indicated thunderstorms.
 - Recent hazard-activity overlays: USGS earthquake catalog events for
-  Northeast India and GPS landslide reports saved on this device, each counted
+  Northeast India and server-shared, human-approved GPS landslide reports, each counted
   over a rolling 365-day window in approximate 10 × 11 km map cells. One or
   two events are yellow, three to five orange, and six or more red. Earthquake
   markers animate a ground crack; landslide reports animate falling rocks.
@@ -48,18 +51,23 @@ localhost or HTTPS. On mobile, deploy to HTTPS to install the PWA.
   station listings may name stations without publishing their contact numbers.
 - Hazard report form limited to landslides and road blocks, with required
   photo, GPS/time capture, and an explicitly labeled sample-location option.
-- Reports and original photos saved in browser IndexedDB on this device.
+- Server-backed sign-up and login with an email and password. Supabase Auth
+  enforces one account per email; email confirmation is disabled, so no OTP or
+  email code is required. Sessions and reports are shared across devices.
+- Hazard descriptions and coordinates are stored in Supabase; the private
+  evidence-photo bucket is available to moderators only. Public map
+  coordinates are rounded, while moderators can review precise coordinates.
+- A moderator-only review queue can approve or reject reports. Only
+  human-approved GPS landslide reports appear in the activity map; only
+  human-approved GPS reports count toward the account's Guardian (5) and
+  Saviour (20) tiers. Reference-location reports do not count.
 - Optional, unchecked-by-default Gemini image triage. With consent, a resized
   photo, category, and description are sent to the Vercel API; GPS coordinates
   are not sent. Triage returns a cautious visual suggestion, not a verification.
 - Optional Gemini conditions summary. With consent, only the displayed
   rainfall estimate and aggregate regional USGS earthquake count are sent;
-  coordinates and locally stored community reports are not included. The
+  coordinates and community report details are not included. The
   generated text is not an alert, forecast, or safety assessment.
-- Reputation counts only human-approved reports with captured GPS, with
-  Guardian at 5 and Saviour at 20. Reference-location reports do not count.
-  Human moderation and shared report storage are not configured, so new report
-  approvals and badge progression are not currently available.
 - Filters and a reference proximity preview. Route options are illustrative;
   no directions provider or live road-closure feed is connected.
 
@@ -87,18 +95,19 @@ incident data. Optional AI photo triage is only a visual
 suggestion: it cannot confirm the event, its time, location, or severity. It
 does not determine whether a report is true or false. Reports remain pending
 human review, and AI suggestions must not be used to judge real-world
-credibility.
+credibility. All reports start pending and require a human review decision.
 The internal rainfall score is not a forecast or geological assessment and
 does not use seismic data. The separate earthquake layer counts USGS catalog
 events; it is not an earthquake susceptibility map, prediction, or official
-warning. Landslide counts come only from GPS reports saved on this browser.
-Those reports are unverified, private to this device, and may be incomplete.
+warning. Landslide counts come only from human-approved GPS reports on the
+configured server and may be incomplete.
 The USGS query uses a fixed rectangle spanning Northeast India and nearby
 border regions, grouped into 0.1° cells (approximately 10 × 11 km);
 the colors summarize event counts, not risk. The NRSC/ISRO Landslide Atlas is
 provided as historical reference for mapped landslides from 1998–2022, but is
-not used for live or rolling-year counts. A current, map-ready NRSC incident
-feed and shared report database are not connected. Nearby rain is a separate
+not used for live or rolling-year counts. Community map counts include only
+human-approved GPS landslide reports shared through the configured server.
+Nearby rain is a separate
 Open-Meteo estimate and does not increase a hazard tier. Open-Meteo is a
 third-party forecast model, not an
 on-site rain gauge; it has no free-tier uptime guarantee. The free API is for
@@ -109,10 +118,11 @@ grid coordinates are sent to Open-Meteo, the map requests earthquake data for
 the fixed Northeast India and nearby-border rectangle from the USGS GeoJSON
 service, and map tiles are requested from OpenStreetMap. The earthquake catalog is cached in this
 browser and refreshed every 15 minutes while online. GPS weather is not saved
-as weather cache data. Reports and original photos are stored locally in the
-browser. Accounts, shared report storage, human moderation, automatic sync,
-dispatch, and official incident feeds are not connected. The optional Gemini
-endpoint performs visual triage only when it is configured and the user opts in.
+as weather cache data. Authentication, report metadata, moderation decisions,
+and private evidence photos use the configured Supabase project through
+Vercel serverless functions. Shared reports require an internet connection;
+the service worker never caches API responses. The optional Gemini endpoint
+performs visual triage only when configured and explicitly requested.
 
 The safety guide is general information, not a substitute for emergency
 services. In India, call 112 for emergencies and follow instructions from
@@ -153,17 +163,48 @@ to confirm.
 
 ## Deploying on Vercel
 
-Import the repository into Vercel and use the repository root. No framework
-preset, build command, or output directory is required. Vercel HTTPS enables
-PWA installation and offline app-shell caching. The `/api/review-report` and
-`/api/summarize-conditions` functions are available on Vercel deployments;
-serving the files with `python -m http.server` does not run those APIs.
+The app's `/api/*` routes are Vercel serverless functions. For local API
+development, use the Vercel CLI (`vercel dev`); a static server such as
+`python -m http.server` does not run API routes. To deploy, import this
+repository into Vercel and use the repository root. No framework preset,
+build command, or output directory is required.
+
+### Configure Supabase
+
+1. Create a Supabase project on its free tier.
+2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql).
+   This creates the reports table and a private JPEG evidence bucket. Direct
+   client access to the reports table is disabled; the Vercel API uses the
+   service-role key.
+3. In Supabase Authentication settings, disable email confirmation for the
+   Email provider. Sign-up then creates a session immediately without sending
+   an OTP or confirmation email. Supabase still enforces a unique email.
+4. In Vercel Project Settings → Environment Variables, set:
+   - `SUPABASE_URL` — the project URL.
+   - `SUPABASE_ANON_KEY` — the project's publishable/anon key.
+   - `SUPABASE_SERVICE_ROLE_KEY` — the service-role secret. Keep this only in
+     Vercel server environment variables; never expose or commit it.
+5. Deploy or redeploy. Use the deployed site over HTTPS. Only API responses
+   are uncached; the static app shell can be cached for offline safety guidance.
+
+### Configure moderators
+
+1. Sign up for a HillSafe account on the deployed site.
+2. Copy that user's UUID from Supabase Authentication → Users.
+3. Set `MODERATOR_USER_IDS` in Vercel to a comma-separated list of moderator
+   UUIDs, then redeploy. Authorization uses user IDs, not emails, because email
+   confirmation is disabled.
+
+Until Supabase credentials are configured and the schema is applied, accounts,
+reports, profile tiers, and moderation will not work. The app reports this
+configuration error; it does not fall back to local accounts or local report
+storage.
 
 To enable optional AI features, add `GEMINI_API_KEY` as a Vercel project
 environment variable and redeploy. Create the key in Google AI Studio; never
 put it in client-side files or commit it to the repository. The function uses
 `gemini-3.1-flash-lite` by default. `GEMINI_MODEL` may optionally override the
-model name. Without a configured key, reports still save locally and AI
+model name. Without a configured key, reports still save to Supabase, but AI
 features are unavailable.
 
 The report form's AI consent checkbox is unchecked by default. Only after a
@@ -177,9 +218,9 @@ rate limit is included per function instance and is not durable abuse prevention
 
 The AI result is strictly triage (likely match, uncertain, or likely mismatch)
 with a short explanation of visible evidence. It cannot authenticate the
-report, image date, location, or danger level. An authenticated human
-moderation system and shared database are not implemented; therefore reports
-stay pending and Guardian/Saviour counts do not advance.
+report, image date, location, or danger level. Every report remains pending
+until an authorized human moderator reviews it; AI suggestions cannot approve
+reports or advance Guardian/Saviour counts.
 
 The conditions-summary checkbox is also unchecked by default. After consent,
 the app sends the current weather estimate and regional USGS earthquake count

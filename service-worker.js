@@ -1,5 +1,5 @@
-const CACHE_NAME = "hillguard-app-shell-v14";
-const APP_SHELL = ["/", "/index.html", "/styles.css", "/contacts.js", "/app.js", "/manifest.webmanifest", "/icon.svg"];
+const CACHE_NAME = "hillguard-app-shell-v17";
+const APP_SHELL = ["/", "/index.html", "/styles.css", "/contacts.js", "/app.js", "/moderation.html", "/moderation.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -23,7 +23,11 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const requestUrl = new URL(event.request.url);
-  if (event.request.method !== "GET" || requestUrl.origin !== self.location.origin) return;
+  if (
+    event.request.method !== "GET"
+    || requestUrl.origin !== self.location.origin
+    || requestUrl.pathname.startsWith("/api/")
+  ) return;
 
   event.respondWith(
     fetch(event.request)

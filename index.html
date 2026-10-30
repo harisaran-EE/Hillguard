@@ -34,7 +34,9 @@
           <svg class="theme-icon theme-icon-sun" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="3.3" stroke="currentColor" stroke-width="1.6"/><path d="M10 1.8v1.5m0 13.4v1.5M18.2 10h-1.5M3.3 10H1.8m14-5.8-1.1 1.1M5.3 14.7l-1.1 1.1m11.6 0-1.1-1.1M5.3 5.3 4.2 4.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
           <span id="theme-label">Dark mode</span>
         </button>
+        <button class="install-button" id="open-account" type="button">Account</button>
         <button class="install-button" id="install-app" type="button" hidden>Install app</button>
+        <a class="install-button" id="moderation-link" href="/moderation.html" hidden>Review reports</a>
         <span class="connectivity" id="connectivity" role="status" aria-live="polite">
           <span class="connectivity-dot" aria-hidden="true"></span>
           <span id="connectivity-label">Checking connection</span>
@@ -45,7 +47,7 @@
     <main class="app-shell" id="dashboard">
       <section class="source-banner" aria-label="Data sources and coverage">
         <span class="banner-mark" aria-hidden="true">i</span>
-        <p><strong>Data sources</strong> · Weather estimates: Open-Meteo. Earthquake catalog: USGS. Reports are stored on this device. Official incident dispatch and shared report verification are not connected.</p>
+        <p><strong>Data sources</strong> · Weather estimates: Open-Meteo. Earthquake catalog: USGS. Community reports and evidence are stored on the HillSafe server; approved map locations are approximate. Official dispatch is not connected.</p>
         <button class="text-button" id="banner-dismiss" type="button" aria-label="Dismiss data source notice">×</button>
       </section>
 
@@ -59,7 +61,7 @@
         <div>
           <p class="eyebrow"><span class="eyebrow-line"></span> TERRAIN AWARENESS / <span id="region-label">NORTHEAST INDIA</span></p>
           <h1>Know the road.<br><span>Avoid the risk.</span></h1>
-          <p class="heading-copy">A local-first view of rainfall estimates, earthquake catalog activity, and community road reports across Northeast India.</p>
+          <p class="heading-copy">A terrain-awareness view of rainfall estimates, earthquake catalog activity, and shared community road reports across Northeast India.</p>
           <div class="hero-actions">
             <a class="primary-button hero-map-link" href="#rain-map">Open live map <span aria-hidden="true">↓</span></a>
             <button class="secondary-button" id="open-report-header" type="button">Report a hazard</button>
@@ -101,7 +103,7 @@
             <span><i class="hazard-legend-dot red"></i>Red · 6+</span>
             <small>Counts per approximate 10 × 11 km map cell over the past 365 days. Nearby estimated rain adds a blue droplet to landslide markers; it does not change their tier.</small>
           </div>
-          <div class="map-foot"><span>Earthquakes: <a href="https://earthquake.usgs.gov/" target="_blank" rel="noopener noreferrer">USGS catalog</a> · activity is not a forecast.</span><span>Landslides: local GPS reports, unverified and not shared · <a href="https://www.nrsc.gov.in/nrscnew/resources_atlas_landslide.php" target="_blank" rel="noopener noreferrer">NRSC/ISRO Atlas (historical through 2022)</a> · Map © OpenStreetMap contributors · Rain: Open-Meteo</span></div>
+          <div class="map-foot"><span>Earthquakes: <a href="https://earthquake.usgs.gov/" target="_blank" rel="noopener noreferrer">USGS catalog</a> · activity is not a forecast.</span><span>Landslides: shared, human-approved GPS reports shown approximately; approval is not an official warning · <a href="https://www.nrsc.gov.in/nrscnew/resources_atlas_landslide.php" target="_blank" rel="noopener noreferrer">NRSC/ISRO Atlas (historical through 2022)</a> · Map © OpenStreetMap contributors · Rain: Open-Meteo</span></div>
         </div>
       </section>
 
@@ -135,8 +137,8 @@
 
       <section class="safety-strip" id="safety-strip" aria-label="Offline and trust status">
         <div class="safety-icon" aria-hidden="true">⌁</div>
-        <div class="safety-copy"><strong id="safety-title">Offline-ready guide</strong><span id="safety-description">Emergency steps are stored with this app shell. User reports stay on this device.</span></div>
-        <span class="queue-count" id="queue-count">0 LOCAL</span>
+        <div class="safety-copy"><strong id="safety-title">Offline-ready guide</strong><span id="safety-description">Emergency guidance is cached with the app shell. Shared reports need an internet connection.</span></div>
+        <span class="queue-count" id="queue-count">0 SHARED</span>
       </section>
       <section class="emergency-card contact-directory" id="emergency-resources" aria-labelledby="emergency-title">
         <div class="emergency-card-heading">
@@ -157,7 +159,7 @@
       </div>
 
       <section class="reports-section" aria-labelledby="reports-title">
-        <div class="reports-heading"><div><p class="section-kicker">COMMUNITY SIGNAL</p><h2 id="reports-title">Hazard reports <span class="example-count">EXAMPLE DATA</span></h2></div><div class="reports-meta"><span id="report-count">3 example reports</span><span class="verified-key"><i></i> Confidence is not official verification</span></div></div>
+        <div class="reports-heading"><div><p class="section-kicker">COMMUNITY SIGNAL</p><h2 id="reports-title">Hazard reports <span class="example-count" id="report-data-label">SERVER + EXAMPLES</span></h2></div><div class="reports-meta"><span id="report-count">Loading shared reports…</span><span class="verified-key"><i></i> Human review is not an official warning</span></div></div>
         <div class="report-filters" role="group" aria-label="Filter reports">
           <button class="filter-chip" type="button" data-filter="all" aria-pressed="true">All <span id="filter-all-count">3</span></button>
           <button class="filter-chip" type="button" data-filter="landslide" aria-pressed="false">Landslide</button>
@@ -166,9 +168,9 @@
         <div class="incident-list" id="incident-list" aria-live="polite"></div>
       </section>
 
-      <section class="reputation-strip" aria-label="Local report reputation">
+      <section class="reputation-strip" aria-label="Server-verified report reputation">
         <span class="reputation-emblem" aria-hidden="true">✳</span>
-        <span class="reputation-copy"><strong id="reputation-title">Local report contributor</strong><small id="reputation-progress">Human moderation is not connected · 0/5 approved</small></span>
+        <span class="reputation-copy"><strong id="reputation-title">Community report contributor</strong><small id="account-identity">Log in to submit reports and track your tier</small><small id="reputation-progress">Your approved report count is verified by the server</small></span>
         <span class="reputation-xp"><strong id="successful-report-total">0</strong><small>APPROVED</small></span>
         <span class="reputation-badge" id="reputation-badge">SCOUT</span>
       </section>
@@ -179,8 +181,31 @@
         <button class="dock-action" id="open-guide" type="button"><span class="dock-icon">⌂</span><span>Offline guide</span></button>
         <button class="dock-action" id="open-route" type="button"><span class="dock-icon">↗</span><span>Route preview</span></button>
       </nav>
-      <p class="page-disclaimer">Weather is a model estimate; earthquake markers summarize the USGS catalog; community reports and reputation are stored locally and are not shared or independently verified. AI photo triage is a suggestion, not a decision. Official emergency dispatch and live road-closure feeds are not integrated. In India, call <a href="tel:112">112</a> for emergencies and follow instructions from local authorities.</p>
+      <p class="page-disclaimer">Weather is a model estimate; earthquake markers summarize the USGS catalog. Community reports are shared on the HillSafe server; submitted locations and resized photos are stored for moderation, and approved map locations are approximate. Human approval and AI photo triage are not official warnings or dispatch. In India, call <a href="tel:112">112</a> for emergencies and follow instructions from local authorities.</p>
     </main>
+
+    <dialog class="app-dialog compact-dialog" id="account-dialog" aria-labelledby="account-dialog-title">
+      <div class="dialog-body">
+        <div class="dialog-header"><div><p class="section-kicker">HILLSAFE ACCOUNT</p><h2 id="account-dialog-title">Welcome back.</h2></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
+        <div class="account-mode-switch" role="group" aria-label="Account access">
+          <button class="account-mode-button" type="button" data-account-mode="login" aria-pressed="true">Log in</button>
+          <button class="account-mode-button" type="button" data-account-mode="signup" aria-pressed="false">Sign up</button>
+        </div>
+        <form class="account-form" id="login-form">
+          <label class="form-field" for="login-email">Email address<input id="login-email" name="email" type="email" autocomplete="username" maxlength="254" required></label>
+          <label class="form-field" for="login-password">Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+          <p class="form-footnote">Create an account with an email and password to submit reports and carry your verified tier across devices. No email code is required.</p>
+          <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog>Cancel</button><button class="primary-button" type="submit">Log in</button></div>
+        </form>
+        <form class="account-form" id="signup-form" hidden>
+          <label class="form-field" for="signup-email">Email address<input id="signup-email" name="email" type="email" autocomplete="email" maxlength="254" required></label>
+          <label class="form-field" for="signup-password">Password<input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+          <label class="form-field" for="signup-confirm-password">Confirm password<input id="signup-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+          <p class="form-footnote">Your account is stored on the HillSafe server. Email confirmation is disabled; use an email address you control.</p>
+          <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog>Cancel</button><button class="primary-button" type="submit">Create account</button></div>
+        </form>
+      </div>
+    </dialog>
 
     <nav class="mobile-navigation" aria-label="Quick navigation">
       <a href="#rain-map"><span aria-hidden="true">⌖</span><small>Map</small></a>
@@ -193,15 +218,16 @@
 
     <dialog class="app-dialog" id="report-dialog" aria-labelledby="report-dialog-title">
       <form class="dialog-body" id="report-form">
-        <div class="dialog-header"><div><p class="section-kicker">COMMUNITY REPORT · OPTIONAL AI TRIAGE</p><h2 id="report-dialog-title">Share what you saw.</h2><p>Only report from a safe place. Reports stay on this device.</p></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
+        <div class="dialog-header"><div><p class="section-kicker">COMMUNITY REPORT · OPTIONAL AI TRIAGE</p><h2 id="report-dialog-title">Share what you saw.</h2><p>Only report from a safe place. Reports and resized photos are stored on the HillSafe server.</p></div><button class="icon-close" type="button" data-close-dialog aria-label="Close">×</button></div>
         <label class="form-field">What are you reporting?<select name="type" required><option value="landslide">Landslide</option><option value="roadblock">Road block</option></select></label>
         <label class="form-field">Nearby road or landmark<input name="location" maxlength="70" placeholder="e.g. near the bridge or road marker" required></label>
         <label class="form-field">What did you observe?<textarea name="description" maxlength="240" rows="3" placeholder="Describe visible conditions, not assumptions." required></textarea></label>
-        <label class="form-field">Photo evidence <span class="field-help">Required · captured or selected on this device</span><input id="report-photo" name="photo" type="file" accept="image/*" capture="environment" required></label>
+        <label class="form-field">Photo evidence <span class="field-help">Required · choose or capture on this device</span><input id="report-photo" name="photo" type="file" accept="image/*" capture="environment" required></label>
         <div class="photo-preview" id="photo-preview" hidden></div>
         <div class="location-capture"><div><strong>Location &amp; time</strong><span id="captured-location">Location not captured</span></div><button class="secondary-button" id="capture-location" type="button">Capture GPS</button></div>
         <div class="location-capture reference-location-capture"><div><strong>Reference location</strong><span>This Guwahati reference coordinate is not your GPS location.</span></div><button class="text-button" id="use-reference-report-location" type="button">Use reference</button></div>
-        <p class="form-footnote">GPS is requested only when you tap capture and stays on this device. The AI request never includes your coordinates.</p>
+        <p class="form-footnote">GPS is sent to HillSafe for moderation and reputation checks. Approved map locations are rounded before public display. AI triage does not receive coordinates.</p>
+        <label class="ai-consent"><input name="shareConsent" type="checkbox" required><span>I agree to share this report, its location, and a resized JPEG evidence photo with HillSafe for community display and human moderation. Evidence photos are private and available only to moderators.</span></label>
         <label class="ai-consent">
           <input name="aiConsent" type="checkbox">
           <span>Request optional AI photo triage. I agree to send the resized photo, report category, and description to Google Gemini’s free API. Google may use free-tier content to improve products and human reviewers may process it. I will not send photos containing faces, license plates, or other personal or sensitive details. <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener noreferrer">Gemini API terms</a></span>

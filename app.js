@@ -1,6 +1,4 @@
-const DATABASE_NAME = "hillguard-local";
-const DATABASE_VERSION = 1;
-const REPORTS_STORE = "reports";
+const ACTIVE_ACCOUNT_KEY = "hillguard-active-session";
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 const GEOFENCE_RADIUS_KM = 5;
 const SAMPLE_WEATHER_LABEL = "Guwahati reference area";
@@ -83,8 +81,14 @@ const elements = {
   hazardMapStatus: document.querySelector("#hazard-map-status"),
   hazardRefresh: document.querySelector("#refresh-hazards"),
   reportCount: document.querySelector("#report-count"),
+  reportDataLabel: document.querySelector("#report-data-label"),
   filterAllCount: document.querySelector("#filter-all-count"),
   reportDialog: document.querySelector("#report-dialog"),
+  accountDialog: document.querySelector("#account-dialog"),
+  loginForm: document.querySelector("#login-form"),
+  signupForm: document.querySelector("#signup-form"),
+  accountIdentity: document.querySelector("#account-identity"),
+  moderationLink: document.querySelector("#moderation-link"),
   guideDialog: document.querySelector("#guide-dialog"),
   routeDialog: document.querySelector("#route-dialog"),
   reportForm: document.querySelector("#report-form"),
@@ -114,8 +118,11 @@ const elements = {
   contactList: document.querySelector("#contact-list")
 };
 
-let database;
 let savedReports = [];
+let activeAccount = null;
+let authSession = null;
+let approvedReportCount = null;
+let openReportAfterAccount = false;
 let currentFilter = "all";
 let currentLocation = null;
 let capturedReportLocation = null;
@@ -216,6 +223,7 @@ async function generateConditionsSummary() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input)
     });
+
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.error || `AI summary returned HTTP ${response.status}.`);
@@ -277,38 +285,131 @@ document.querySelector("#theme-toggle").addEventListener("click", () => {
   }
 });
 
-function openDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-
-    request.onupgradeneeded = () => {
-      const store = request.result.createObjectStore(REPORTS_STORE, { keyPath: "id" });
-      store.createIndex("createdAt", "createdAt");
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not open local report storage."));
-    request.onblocked = () => reject(new Error("Local report storage is blocked by another open tab."));
-  });
+function setAuthSession(session) {
+  authSession = session;
+  activeAccount = { id: session.user.id, email: session.user.email };
+  sessionStorage.setItem(ACTIVE_ACCOUNT_KEY, JSON.stringify(session));
+  renderAccountState();
 }
 
-function readSavedReports() {
-  return new Promise((resolve, reject) => {
-    const transaction = database.transaction(REPORTS_STORE, "readonly");
-    const request = transaction.objectStore(REPORTS_STORE).getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not read locally saved reports."));
-    transaction.onabort = () => reject(transaction.error ?? new Error("Reading locally saved reports failed."));
-  });
+function clearAuthSession() {
+  sessionStorage.removeItem(ACTIVE_ACCOUNT_KEY);
+  authSession = null;
+  activeAccount = null;
+  approvedReportCount = null;
+  renderAccountState();
 }
 
-function writeReport(report) {
-  return new Promise((resolve, reject) => {
-    const transaction = database.transaction(REPORTS_STORE, "readwrite");
-    transaction.objectStore(REPORTS_STORE).put(report);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("Could not save your report."));
-    transaction.onabort = () => reject(transaction.error ?? new Error("Saving your report was interrupted."));
+async function logoutAccount() {
+  try {
+    if (authSession) {
+      await apiRequest("/api/auth", {
+        method: "POST",
+        body: { action: "logout" }
+      });
+    }
+    showToast("You have been logged out.");
+  } catch (error) {
+    console.error("Could not invalidate the server session.", error);
+    showToast(`Logged out on this device, but server session invalidation failed: ${error.message}`);
+  } finally {
+    clearAuthSession();
+    try {
+      await refreshSavedReports();
+    } catch (error) {
+      console.error("Could not refresh public reports after logout.", error);
+      showToast(`Logged out. Shared reports could not refresh: ${error.message}`);
+    }
+  }
+}
+
+async function refreshAuthSession() {
+  if (!authSession?.refreshToken) {
+    clearAuthSession();
+    return false;
+  }
+  const response = await fetch("/api/auth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "refresh", refreshToken: authSession.refreshToken })
   });
+  const result = await response.json();
+  if (!response.ok) {
+    if ([400, 401].includes(response.status)) clearAuthSession();
+    throw new Error(result.error || "Your session expired. Log in again.");
+  }
+  setAuthSession(result);
+  return true;
+}
+
+async function apiRequest(path, { method = "GET", body, authenticated = true } = {}, retried = false) {
+  if (authenticated && !authSession) throw new Error("Log in to continue.");
+  if (authenticated && authSession.expiresAt <= Date.now() + 30_000) {
+    await refreshAuthSession();
+    if (!authSession) throw new Error("Your session expired. Log in again.");
+  }
+
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (authenticated) headers.Authorization = `Bearer ${authSession.accessToken}`;
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store"
+  });
+  const responseText = await response.text();
+  let result;
+  try {
+    result = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    throw new Error("The server API is unavailable. Run the Vercel development server and configure the backend.");
+  }
+  if (response.status === 401 && authenticated && !retried && authSession.refreshToken) {
+    await refreshAuthSession();
+    return apiRequest(path, { method, body, authenticated }, true);
+  }
+  if (!response.ok) {
+    if (response.status === 401 && authenticated) clearAuthSession();
+    throw new Error(result.error || `The server returned HTTP ${response.status}.`);
+  }
+  return result;
+}
+
+async function submitAuthAction(action, email, password) {
+  const result = await apiRequest("/api/auth", {
+    method: "POST",
+    authenticated: false,
+    body: { action, email, password }
+  });
+  setAuthSession(result);
+  return result.user;
+}
+
+async function restoreActiveAccount() {
+  const storedSession = sessionStorage.getItem(ACTIVE_ACCOUNT_KEY);
+  if (!storedSession) return;
+  let session;
+  try {
+    session = JSON.parse(storedSession);
+    if (
+      typeof session.accessToken !== "string"
+      || typeof session.refreshToken !== "string"
+      || !Number.isFinite(session.expiresAt)
+      || typeof session.user?.id !== "string"
+      || typeof session.user?.email !== "string"
+    ) {
+      throw new Error("The saved login session is invalid.");
+    }
+  } catch (error) {
+    clearAuthSession();
+    console.warn("The saved server session is invalid.", error);
+    return;
+  }
+  authSession = session;
+  activeAccount = { id: session.user.id, email: session.user.email };
+  renderAccountState();
+  if (authSession.expiresAt <= Date.now() + 30_000) await refreshAuthSession();
 }
 
 function getLocalLocation() {
@@ -331,12 +432,22 @@ function haversineDistanceKm(first, second) {
 }
 
 async function refreshSavedReports() {
-  savedReports = await readSavedReports();
+  const result = await apiRequest("/api/reports", { authenticated: Boolean(authSession) });
+  savedReports = result.reports;
   renderReports();
-  renderReputation();
   renderQueueCount();
-  updateGeofenceAlert();
   renderHazardActivity();
+  if (activeAccount) {
+    elements.moderationLink.hidden = true;
+    const profile = await apiRequest("/api/profile");
+    approvedReportCount = profile.approvedReportCount;
+    elements.moderationLink.hidden = !profile.isModerator;
+  } else {
+    approvedReportCount = null;
+    elements.moderationLink.hidden = true;
+  }
+  renderAccountState();
+  updateGeofenceAlert();
 }
 
 function escapeHtml(value) {
@@ -374,12 +485,12 @@ function renderReportCard(report, local) {
       ? "Human approved"
       : "Pending human review"
     : report.status;
-  const tag = local ? "LOCAL" : "EXAMPLE";
+  const tag = local ? "COMMUNITY" : "EXAMPLE";
   const saviourTag = local && getHumanApprovedReportCount() >= 20 && isHumanApproved
     ? '<span class="saviour-report-tag">SAVIOUR</span>'
     : "";
   const aiReview = local ? formatAiReviewSummary(report) : "";
-  const photoNote = local && report.photoName
+  const photoNote = local
     ? `<span class="photo-attached">PHOTO ATTACHED</span>`
     : "";
   const locationDescription = local && report.locationMode === "sample"
@@ -421,6 +532,7 @@ function renderReports() {
 
   elements.reportCount.textContent = `${allReports.length} ${allReports.length === 1 ? "report" : "reports"} · samples included`;
   elements.filterAllCount.textContent = String(allReports.length);
+  elements.reportDataLabel.textContent = "SERVER + EXAMPLES";
 
   if (visibleReports.length === 0) {
     elements.incidentList.innerHTML = '<p class="empty-state">No reports in this category yet. Add a report with a captured location and photo.</p>';
@@ -438,24 +550,31 @@ function renderReputation() {
   elements.successfulReportTotal.textContent = String(successes);
   elements.reputationBadge.textContent = badge;
   elements.reputationTitle.textContent = badge === "SAVIOUR"
-    ? "Saviour · local"
+    ? "Saviour · verified"
     : badge === "GUARDIAN"
-      ? "Guardian · local"
-      : "Local report contributor";
-  elements.reputationProgress.textContent = badge === "SAVIOUR"
-    ? "Saviour tag shown on human-approved local reports"
-    : badge === "GUARDIAN"
-      ? `${successes} human-approved reports · stored on this device`
-      : `Human moderation is not connected · ${successes}/5 approved`;
+      ? "Guardian · verified"
+      : "Community report contributor";
+  elements.reputationProgress.textContent = approvedReportCount === null
+    ? activeAccount
+      ? "Could not load your server-verified tier"
+      : "Log in to track your approved reports"
+    : badge === "SAVIOUR"
+      ? "Saviour tag shown on your human-approved GPS reports"
+      : `${successes} human-approved GPS reports · ${badge === "GUARDIAN" ? "Guardian tier reached" : `${5 - successes} more to Guardian`}`;
   elements.reputationBadge.dataset.rank = badge.toLowerCase();
 }
 
+function renderAccountState() {
+  document.querySelector("#open-account").textContent = activeAccount ? "Log out" : "Login / sign up";
+  elements.accountIdentity.textContent = activeAccount
+    ? `Signed in · ${activeAccount.email}`
+    : "Log in to submit reports and track your tier";
+  if (!activeAccount) elements.moderationLink.hidden = true;
+  renderReputation();
+}
+
 function getHumanApprovedReportCount() {
-  return savedReports.filter((report) =>
-    report.locationMode !== "sample"
-    && report.humanReviewStatus === "approved"
-    && Number.isFinite(report.humanApprovedAt)
-  ).length;
+  return approvedReportCount ?? 0;
 }
 
 function formatAiReviewSummary(report) {
@@ -475,7 +594,7 @@ function formatAiReviewSummary(report) {
 }
 
 function renderQueueCount() {
-  elements.queueCount.textContent = `${savedReports.length} LOCAL`;
+  elements.queueCount.textContent = `${savedReports.length} SHARED`;
 }
 
 function contactPhoneLink(phone, label) {
@@ -604,11 +723,11 @@ function initializeContactDirectory() {
 function updateConnectivity() {
   const online = navigator.onLine;
   elements.connectivity.classList.toggle("offline", !online);
-  elements.connectivityLabel.textContent = online ? "Online · local only" : "Offline engine active";
-  elements.safetyTitle.textContent = online ? "Offline-ready guide" : "Offline mode · local data";
+  elements.connectivityLabel.textContent = online ? "Online · server connected" : "Offline · server unavailable";
+  elements.safetyTitle.textContent = online ? "Offline-ready guide" : "Offline mode · view only";
   elements.safetyDescription.textContent = online
-    ? "Emergency steps are cached. Reports stay on this device; no sync server is configured."
-    : "Cached safety guide and saved reports are available. New reports remain on this device.";
+    ? "Emergency steps are cached. Accounts and community reports sync through the server."
+    : "Cached safety guide is available. Sign-in, report submission, and moderation require a connection.";
 }
 
 function updateGeofenceAlert() {
@@ -754,7 +873,7 @@ function getRecentLandslideReports(now = Date.now()) {
   return savedReports.filter((report) =>
     report.type === "landslide"
     && report.locationMode === "gps"
-    && report.humanReviewStatus !== "rejected"
+    && report.humanReviewStatus === "approved"
     && hasValidCoordinates(report)
     && Number.isFinite(report.createdAt)
     && report.createdAt >= cutoff
@@ -867,7 +986,7 @@ function formatHazardStatus() {
         ? `USGS catalog: no earthquake events in the last 365 days${earthquakeUpdate ? ` · updated ${earthquakeUpdate}` : ""}.`
         : "Loading USGS earthquake catalog for Northeast India and nearby border regions…";
   const cacheNote = earthquakeCacheError ? ` ${earthquakeCacheError}` : "";
-  elements.hazardMapStatus.textContent = `${earthquakeStatus} Landslide reports on this device: ${localLandslides.length} · unverified, not shared.${cacheNote}`;
+  elements.hazardMapStatus.textContent = `${earthquakeStatus} Shared human-approved GPS landslide reports in the past year: ${localLandslides.length}.${cacheNote}`;
 }
 
 function hasNearbyRain(location) {
@@ -898,7 +1017,7 @@ function createHazardPopup(type, group, rainNearby = false) {
     return `<strong>${group.count} USGS earthquake event${group.count === 1 ? "" : "s"} · ${tier.toUpperCase()}</strong><p>Approx. 10 × 11 km map cell · past 365 days. Latest: ${escapeHtml(group.latest.place)} · ${date}${magnitude}.</p><p>Activity counts are not a forecast or an official warning.</p><a href="https://earthquake.usgs.gov/" target="_blank" rel="noopener noreferrer">USGS earthquake catalog</a>`;
   }
 
-  return `<strong>${group.count} local landslide report${group.count === 1 ? "" : "s"} · ${tier.toUpperCase()}</strong><p>Approx. 10 × 11 km map cell · past 365 days. Latest report: ${date}.</p><p>Reports are unverified, stored only on this device, and are not an official warning.</p>${rainMessage}<a href="https://www.nrsc.gov.in/nrscnew/resources_atlas_landslide.php" target="_blank" rel="noopener noreferrer">NRSC/ISRO Landslide Atlas · historical context</a>`;
+  return `<strong>${group.count} human-approved GPS landslide report${group.count === 1 ? "" : "s"} · ${tier.toUpperCase()}</strong><p>Approx. 10 × 11 km map cell · past 365 days. Latest report: ${date}.</p><p>Moderation approval is not an official warning or confirmation of current danger.</p>${rainMessage}<a href="https://www.nrsc.gov.in/nrscnew/resources_atlas_landslide.php" target="_blank" rel="noopener noreferrer">NRSC/ISRO Landslide Atlas · historical context</a>`;
 }
 
 function addHazardMarker(type, group, rainNearby = false) {
@@ -916,7 +1035,7 @@ function addHazardMarker(type, group, rainNearby = false) {
     iconSize: [42, 42],
     iconAnchor: [21, 21]
   });
-  const latest = type === "earthquake" ? group.latest.place : "Unverified local report";
+  const latest = type === "earthquake" ? group.latest.place : "Unverified community report";
   const marker = window.L.marker([group.latitude, group.longitude], {
     icon,
     title: `${type === "earthquake" ? "Earthquake activity" : "Landslide reports"}: ${group.count} in the past 365 days · ${latest}${rainNearby ? " · rain estimated nearby" : ""}`
@@ -1448,9 +1567,9 @@ function blobToBase64(blob) {
   });
 }
 
-async function preparePhotoForAi(photo) {
+async function preparePhotoForUpload(photo) {
   if (typeof createImageBitmap !== "function") {
-    throw new Error("This browser cannot safely resize the photo for AI review.");
+    throw new Error("This browser cannot safely resize the photo for upload.");
   }
 
   const bitmap = await createImageBitmap(photo);
@@ -1461,7 +1580,7 @@ async function preparePhotoForAi(photo) {
       canvas.width = Math.max(1, Math.round(bitmap.width * scale));
       canvas.height = Math.max(1, Math.round(bitmap.height * scale));
       const context = canvas.getContext("2d", { alpha: false });
-      if (!context) throw new Error("Could not prepare the report photo for AI review.");
+      if (!context) throw new Error("Could not prepare the report photo for upload.");
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
       for (const quality of [0.82, 0.68, 0.54]) {
@@ -1479,25 +1598,20 @@ async function preparePhotoForAi(photo) {
     bitmap.close();
   }
 
-  throw new Error("The photo is too large to prepare for AI review.");
+  throw new Error("The photo is too large to prepare for upload.");
 }
 
-async function requestAiTriage(report) {
-  const image = await preparePhotoForAi(report.photo);
-  const response = await fetch("/api/review-report", {
+async function requestAiTriage(report, image) {
+  const result = await apiRequest("/api/review-report", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    body: {
       consent: true,
       type: report.type,
       description: report.description,
+      reportId: report.id,
       image
-    })
+    }
   });
-  const result = await response.json();
-  if (!response.ok) {
-    throw new Error(result.error || `AI review returned HTTP ${response.status}.`);
-  }
   if (
     !result
     || !["likely_match", "uncertain", "likely_mismatch"].includes(result.category)
@@ -1513,6 +1627,14 @@ async function requestAiTriage(report) {
 
 async function handleReportSubmit(event) {
   event.preventDefault();
+  if (!activeAccount) {
+    showToast("Log in to your server account before submitting a report.");
+    elements.reportDialog.close();
+    setAccountMode("signup");
+    elements.accountDialog.showModal();
+    openReportAfterAccount = true;
+    return;
+  }
   if (!elements.reportForm.reportValidity()) return;
 
   const formData = new FormData(elements.reportForm);
@@ -1543,69 +1665,62 @@ async function handleReportSubmit(event) {
   }
 
   const requestAiReview = elements.reportForm.elements.aiConsent.checked;
-  const report = {
-    id: crypto.randomUUID(),
-    type,
-    location,
-    description,
-    latitude: capturedReportLocation.latitude,
-    longitude: capturedReportLocation.longitude,
-    locationMode: capturedReportLocation.mode,
-    createdAt: Date.now(),
-    photo,
-    photoName: photo.name,
-    aiReviewStatus: requestAiReview
-      ? navigator.onLine
-        ? "pending"
-        : "offline"
-      : "not-requested",
-    aiReview: null,
-    humanReviewStatus: "pending",
-    humanApprovedAt: null
-  };
   const submitButton = elements.reportForm.querySelector('button[type="submit"]');
   submitButton.disabled = true;
 
   try {
-    await writeReport(report);
-    await refreshSavedReports();
+    if (!navigator.onLine) throw new Error("Connect to the server before submitting a report.");
+    if (!elements.reportForm.elements.shareConsent.checked) {
+      throw new Error("Confirm that this report, approximate map location, and resized evidence photo can be shared.");
+    }
+    const image = await preparePhotoForUpload(photo);
+    const result = await apiRequest("/api/reports", {
+      method: "POST",
+      body: {
+        shareConsent: true,
+        type,
+        location,
+        description,
+        latitude: capturedReportLocation.latitude,
+        longitude: capturedReportLocation.longitude,
+        locationMode: capturedReportLocation.mode,
+        image
+      }
+    });
+    const report = result.report;
     elements.reportForm.reset();
     capturedReportLocation = null;
     elements.capturedLocation.textContent = "Location not captured";
     clearPhotoPreview();
     elements.reportDialog.close();
     showToast(requestAiReview && navigator.onLine
-      ? "Report saved locally. Requesting optional AI photo triage; human review is still required."
-      : requestAiReview
-        ? "Report saved locally. AI triage is unavailable offline; human review is still required."
-        : "Report saved locally without AI review. It is pending human review.");
+      ? "Report shared with the community. Requesting optional AI triage; human approval is still required."
+      : "Report shared with the community and queued for human review.");
+    try {
+      await refreshSavedReports();
+    } catch (error) {
+      console.error("Report was saved, but the shared feed could not refresh.", error);
+      showToast(`Report was saved. The shared feed could not refresh: ${error.message}`);
+    }
 
-    if (!requestAiReview || !navigator.onLine) return;
+    if (!requestAiReview) return;
 
     try {
-      report.aiReview = await requestAiTriage(report);
+      report.aiReview = await requestAiTriage(report, image);
       report.aiReviewStatus = "complete";
-      report.aiReviewAt = Date.now();
-      await writeReport(report);
+      await apiRequest("/api/reports", {
+        method: "PATCH",
+        body: { reportId: report.id, aiReview: report.aiReview }
+      });
       await refreshSavedReports();
       showToast("AI triage suggestion received. This report is still pending human review.");
     } catch (error) {
       console.error("AI photo triage failed; the report remains saved for human review.", error);
-      report.aiReviewStatus = "unavailable";
-      report.aiReviewError = error.message;
-      try {
-        await writeReport(report);
-        await refreshSavedReports();
-      } catch (saveError) {
-        console.error("Could not save the AI review failure status.", saveError);
-        showToast(`Report was saved, but its AI status could not be updated: ${saveError.message}`);
-        return;
-      }
-      showToast(`Report saved; AI triage failed. It remains pending human review. ${error.message}`);
+      showToast(`Report is saved; AI triage failed. It remains pending human review. ${error.message}`);
     }
   } catch (error) {
-    console.error("Could not save the local hazard report.", error);
-    showToast(`Report was not saved: ${error.message}`);
+    console.error("Could not submit the server-backed hazard report.", error);
+    showToast(`Report was not submitted: ${error.message}`);
   } finally {
     submitButton.disabled = false;
   }
@@ -1636,10 +1751,108 @@ document.querySelector("#alert-dismiss").addEventListener("click", () => {
 });
 
 function openReportDialog() {
+  if (!activeAccount) {
+    openReportAfterAccount = true;
+    setAccountMode("signup");
+    elements.accountDialog.showModal();
+    return;
+  }
   capturedReportLocation = null;
   elements.capturedLocation.textContent = "Location not captured";
   elements.reportDialog.showModal();
 }
+
+function setAccountMode(mode) {
+  const isSignup = mode === "signup";
+  document.querySelectorAll("[data-account-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.accountMode === mode));
+  });
+  elements.loginForm.hidden = isSignup;
+  elements.signupForm.hidden = !isSignup;
+  document.querySelector("#account-dialog-title").textContent = isSignup
+    ? "Create your account."
+    : "Welcome back.";
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  if (!elements.loginForm.reportValidity()) return;
+
+  const formData = new FormData(elements.loginForm);
+  const email = String(formData.get("email")).trim().toLowerCase();
+  const password = String(formData.get("password"));
+  const submitButton = elements.loginForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  try {
+    const account = await submitAuthAction("login", email, password);
+    elements.accountDialog.close();
+    elements.loginForm.reset();
+    showToast(`Logged in as ${account.email}. Your server account is ready.`);
+    await refreshSavedReports().catch((error) => {
+      console.error("Could not load reports after login.", error);
+      showToast(`Logged in, but server reports could not load: ${error.message}`);
+    });
+    if (openReportAfterAccount) {
+      openReportAfterAccount = false;
+      openReportDialog();
+    }
+  } catch (error) {
+    showToast(`Login failed: ${error.message}`);
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+async function handleSignupSubmit(event) {
+  event.preventDefault();
+  if (!elements.signupForm.reportValidity()) return;
+
+  const formData = new FormData(elements.signupForm);
+  const email = String(formData.get("email")).trim().toLowerCase();
+  const password = String(formData.get("password"));
+  const confirmation = String(formData.get("confirmPassword"));
+  if (password !== confirmation) {
+    showToast("The passwords do not match.");
+    return;
+  }
+
+  const submitButton = elements.signupForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  try {
+    const account = await submitAuthAction("signup", email, password);
+    elements.accountDialog.close();
+    elements.signupForm.reset();
+    showToast(`Server account created for ${account.email}.`);
+    await refreshSavedReports().catch((error) => {
+      console.error("Could not load reports after sign up.", error);
+      showToast(`Account created, but server reports could not load: ${error.message}`);
+    });
+    if (openReportAfterAccount) {
+      openReportAfterAccount = false;
+      openReportDialog();
+    }
+  } catch (error) {
+    console.error("Could not create the server account.", error);
+    showToast(`Sign up failed: ${error.message}`);
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+document.querySelector("#open-account").addEventListener("click", () => {
+  if (activeAccount) {
+    void logoutAccount();
+    return;
+  }
+  openReportAfterAccount = false;
+  setAccountMode("login");
+  elements.accountDialog.showModal();
+});
+document.querySelectorAll("[data-account-mode]").forEach((button) => {
+  button.addEventListener("click", () => setAccountMode(button.dataset.accountMode));
+});
+elements.loginForm.addEventListener("submit", handleLoginSubmit);
+elements.signupForm.addEventListener("submit", handleSignupSubmit);
 
 document.querySelectorAll("#open-report-dock, #open-report-header, #open-report-mobile").forEach((button) => {
   button.addEventListener("click", openReportDialog);
@@ -1721,7 +1934,11 @@ elements.reportForm.addEventListener("submit", handleReportSubmit);
 
 window.addEventListener("online", () => {
   updateConnectivity();
-  showToast("Connection restored. Local reports are still on this device; server sync is not configured.");
+  showToast("Connection restored. Refreshing shared community reports.");
+  void refreshSavedReports().catch((error) => {
+    console.error("Could not refresh shared reports after reconnecting.", error);
+    showToast(`Connection restored, but server reports could not load: ${error.message}`);
+  });
   void refreshEarthquakeHistory(true);
   const location = getLocalLocation() ?? { ...SAMPLE_LOCATION, mode: "sample" };
   const label = currentLocation?.mode === "gps"
@@ -1815,16 +2032,15 @@ elements.weatherRefresh.addEventListener("click", () => {
   void refreshWeather(location, label, currentLocation?.mode ?? "sample", true);
 });
 
-openDatabase()
-  .then((openedDatabase) => {
-    database = openedDatabase;
-    return refreshSavedReports();
-  })
+restoreActiveAccount()
+  .then(refreshSavedReports)
   .catch((error) => {
-    console.error("Local report storage could not be initialized.", error);
-    elements.safetyTitle.textContent = "Local storage unavailable";
-    elements.safetyDescription.textContent = "Saved reports could not load. Check browser storage permissions and reload.";
-    showToast(`Local reports are unavailable: ${error.message}`);
+    console.error("Could not load server-backed accounts and reports.", error);
+    elements.reportCount.textContent = "Server reports unavailable";
+    elements.reportDataLabel.textContent = "SERVER OFFLINE";
+    elements.safetyTitle.textContent = "Server unavailable";
+    elements.safetyDescription.textContent = "Accounts and community reports require the configured server. The safety guide remains available.";
+    showToast(`Server data is unavailable: ${error.message}`);
   });
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {

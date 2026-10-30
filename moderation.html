@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <title>Report review — HillSafe</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="HillSafe home">
+        <span class="brand-mark" aria-hidden="true">⌁</span>
+        <span class="brand-copy"><strong>HillSafe</strong><small>Moderator review</small></span>
+      </a>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <a href="/">Return to dashboard</a>
+      </nav>
+    </header>
+    <main class="app-shell moderation-page">
+      <section class="dashboard-heading">
+        <div>
+          <p class="eyebrow"><span class="eyebrow-line"></span> MODERATOR TOOLS</p>
+          <h1>Review community<br><span>reports.</span></h1>
+          <p class="heading-copy">Review the submitted description, location, and private evidence photo. AI triage is only a suggestion; make the decision yourself.</p>
+        </div>
+        <div class="heading-status">
+          <span class="status-label">REVIEW QUEUE</span>
+          <span class="location-value" id="moderation-count">Loading…</span>
+          <button class="location-button" id="refresh-moderation" type="button">Refresh queue</button>
+        </div>
+      </section>
+      <p class="moderation-status" id="moderation-status" role="status" aria-live="polite">Checking your moderator access…</p>
+      <section class="moderation-queue" id="moderation-queue" aria-label="Reports awaiting review"></section>
+      <p class="page-disclaimer">Only approve reports that meet your moderation policy. Approval is not an official incident confirmation or emergency warning. Never use AI suggestions alone to approve or reject a report.</p>
+    </main>
+    <script src="/moderation.js" defer></script>
+  </body>
+</html>
